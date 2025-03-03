@@ -1,0 +1,458 @@
+---
+title: "CyTOF comparison - heatmap of selected markers in ACTP"
+author: "Quy Ai Ngo"
+date: "08-Aug-2022"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+setwd("/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX/CyTOF_comparison/20220808/")
+mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud/"
+```
+
+
+```{r load libraries, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+library(Seurat)
+library(harmony)
+
+library(Matrix)
+library(scater)
+library(scran)
+library(clustree)
+
+library(tidyverse)
+library(readxl)
+library(reshape2)
+library(stringr)
+library(scales)
+library(ggpubr)
+library(cowplot)
+library(patchwork)
+library(EnhancedVolcano)
+library(RColorBrewer)
+library(randomcoloR)
+library(viridis)
+library(rstatix)
+library(heatmaply)
+
+library(knitr)
+library(kableExtra)
+library(reactable)
+
+```
+
+
+# -----------------------------------------------------------------------------------------------------------------------
+## UMAP of clusters from Harmony-corrected data
+```{r graphics clusters,include=TRUE, echo=FALSE, fig.width=14, fig.height=6}
+
+intgHar <- readRDS("../20220729/intgHar_ACTP.NeoTIL.ATATIL_elbow_29pc.k30_1.2res_umap-0.1dist_20220729.rds")
+
+cluster_colors <- distinctColorPalette(length(unique(intgHar$seurat_clusters)))
+p1 <- DimPlot(intgHar, reduction = "umap", 
+              group.by = "seurat_clusters",
+              label = T, repel = F, label.size = 5.5,
+              cols = cluster_colors)
+p2 <- DimPlot(intgHar, reduction = "umap", 
+              group.by = "Samples",
+              label = F, #repel = F, label.size = 5,
+              )
+p1+p2 +
+  plot_annotation(title = paste0("umap 29pc.k30_1.2res"),
+                  theme = theme(plot.title = element_text(size = 24))
+                  )
+
+```
+
+
+# -----------------------------------------------------------------------------------------------------------------------
+## Feature plots for cell lineage marker expression
+```{r graphic feature plots, fig.width=17, fig.height=10, include=TRUE, echo=FALSE}
+
+cellType = c("CD8A", "CD8B", "CD4", "KLRD1", "TRGV5", "CD3E")
+FeaturePlot(intgHar,
+            features = cellType,
+            reduction = "umap", slot = "data",
+            cols = rev(brewer.pal(11, "Spectral")), pt.size = 0.1,
+            label = TRUE, repel = TRUE, label.size = 5, label.color = "magenta",
+            order = TRUE, by.col = TRUE, combine = T, ncol = 3
+            ) +
+    plot_annotation(title = paste0("cell type markers 29pc.k30_1.2res"),
+                    theme = theme(plot.title = element_text(size = 24))
+                    )
+  
+```
+
+
+# -----------------------------------------------------------------------------------------------------------------------
+## Per cluster information:
+### 1) T-cell type
+### 2) CD8 or CD4 expression at 75% quantile
+### 3) cell number per T-cell type
+### 4) T-cell type percentage
+```{r T cell & cluster annotation, include=TRUE, echo=FALSE, results='markup', warning=FALSE, error=FALSE}
+
+#intgHar <- readRDS("../20220729/intgHar_ACTP.NeoTIL.ATATIL_elbow_29pc.k30_1.2res_umap-0.1dist_20220729.rds")
+
+# Define DN T cell type based on (CD8A & CD8B) or CD4 value of the 75% quantile cell in each seurat cluster
+Texpression <- FetchData(intgHar,
+                         vars = c("Samples", "seurat_clusters", "CD8A", "CD8B", "CD4")) %>% 
+  group_by(seurat_clusters) %>% 
+  summarise(CD8AB = CD8A + CD8B, CD4 = CD4)
+clusterNb <- Texpression %>% group_by(seurat_clusters) %>% summarise(cellNb = n())
+
+CD8perc <- Texpression %>% group_by(seurat_clusters, .drop = F) %>% filter(CD8AB > 0 & CD4 == 0) %>% summarise(CD8_Nb = n()) %>% mutate(CD8_perc = round(CD8_Nb/clusterNb$cellNb, 3))
+CD4perc <- Texpression %>% group_by(seurat_clusters, .drop = F) %>% filter(CD4 > 0 & CD8AB == 0) %>% summarise(CD4_Nb = n()) %>% mutate(CD4_perc = round(CD4_Nb/clusterNb$cellNb, 3))
+DPperc <- Texpression %>% group_by(seurat_clusters, .drop = F) %>% filter(CD4 > 0 & CD8AB > 0) %>% summarise(DP_Nb = n()) %>% mutate(DP_perc = round(DP_Nb/clusterNb$cellNb, 3))
+DNperc <- Texpression %>% group_by(seurat_clusters, .drop = F) %>% filter(CD4 == 0 & CD8AB == 0) %>% summarise(DN_Nb = n()) %>% mutate(DN_perc = round(DN_Nb/clusterNb$cellNb, 3))
+
+CD8quant <- tapply(Texpression$CD8AB, Texpression$seurat_clusters, function(x){round(quantile(x,probs=0.75), 3)})
+CD8quant <- CD8quant %>% as.data.frame() %>% rownames_to_column(var = "seurat_clusters") %>% data.table::setnames(".", "CD8_quant75")
+CD4quant <- tapply(Texpression$CD4, Texpression$seurat_clusters, function(x){round(quantile(x,probs=0.75), 3)})
+CD4quant <- CD4quant %>% as.data.frame() %>% rownames_to_column(var = "seurat_clusters") %>% data.table::setnames(".", "CD4_quant75")
+
+clusterLabel <- purrr::reduce(list(clusterNb, CD8quant, CD4quant, CD8perc, CD4perc, DPperc, DNperc),
+                              dplyr::left_join, 
+                              by = "seurat_clusters") #%>%
+clLabel <- clusterLabel %>% select(!c(ends_with("_Nb")))
+
+# clLabel table & featurePlots show cluster16 = DN(NK); CD4 = (14,19); DP = (9,13,17); CD8 = remaining clusters
+
+clLabel <- clLabel %>% 
+  mutate(T_cluster = ifelse(seurat_clusters=="9"|seurat_clusters=="13"|seurat_clusters=="17"|seurat_clusters=="22" , "DP.cluster", 
+                            ifelse(seurat_clusters=="14"|seurat_clusters=="19", "CD4.cluster",
+                                   ifelse(seurat_clusters=="16", "DN.cluster", 
+                                          "CD8.cluster")))) %>% 
+  select(seurat_clusters, T_cluster, cellNb:DN_perc)
+kable(clLabel, caption = "ACTP.NeoTIL.ATATIL - cell number, cluster percentage & 75% quantile of T cells")
+
+rm(CD8perc, CD4perc, DPperc, DNperc, CD8quant, CD4quant, clusterNb)
+
+```
+
+# -----------------------------------------------------------------------------------------------------------------------
+```{r cell proportion of each cell type per cluster, include=TRUE, echo= FALSE, fig.width=8, fig.height=6}
+
+clusterLabel.L <- pivot_longer(clLabel, 
+                               cols = c(CD8_perc, CD4_perc, DP_perc, DN_perc), 
+                               names_to = "CellType", values_to = "percentage") %>% 
+  select(seurat_clusters, CellType, percentage) %>% 
+  mutate(CellType = gsub("_perc", "", CellType))
+clusterLabel.L$CellType <- factor(clusterLabel.L$CellType, levels = c("CD8", "CD4", "DP", "DN"))
+clusterLabel.L$seurat_clusters <- factor(clusterLabel.L$seurat_clusters, levels = c(unique(levels(intgHar$seurat_clusters))))
+
+ggplot(clusterLabel.L, aes(x=seurat_clusters, y=percentage, fill=CellType)) +
+  geom_bar(stat = "identity", position = "fill") +
+  ggtitle("T-cell type percentage per cluster") +
+  theme_classic() +
+  scale_fill_manual(values = c("#E6B0F1", "#71E8D4", "#1E7D6D", "#CFE65C")) +
+  scale_x_discrete(expand = c(0,0, 0,0)) +
+  scale_y_continuous(expand = c(0,0, 0,0), 
+                     breaks = seq(0,1,0.2)
+  ) +
+  #ylab("") +
+  #geom_text(aes(label = cellProportion), size = 6, hjust = 0, vjust = 0.5, position = "stack") +
+  theme(axis.text = element_text(size = 14),
+        plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14, face = "bold"),
+        axis.ticks.y = element_blank(),
+        legend.title = element_text(size = 14, face = "bold"),
+        legend.text = element_text(size = 14)
+  ) +
+  coord_flip()
+
+```
+
+### Based on these results, three clusters 9,13,17 are labeled as double-positive ("DP.cluster"); 16 as DN.cluster; 14,19 as CD4.cluster and all other clusters as CD8 ("CD8.cluster").
+# -----------------------------------------------------------------------------------------------------------------------
+
+```{r Add T cell type and annotation to seurat object, include=FALSE, echo=FALSE, warning=FALSE, message=FALSE}
+
+intgHar <- readRDS("../20220729/intgHar_ACTP.NeoTIL.ATATIL_elbow_29pc.k30_1.2res_umap-0.1dist_20220729.rds")
+
+# Based on the above results, rename cluster identities to add the new metadata column "T_clusters"
+new.cl <- c(rep('CD8.cluster',9), 'DP.cluster', rep('CD8.cluster',3), 'DP.cluster', 'CD4.cluster', 'CD8.cluster',
+            'DN.cluster', 'DP.cluster', 'CD8.cluster', 'CD4.cluster', rep('CD8.cluster',2), 'DP.cluster')
+names(new.cl) <- levels(intgHar)
+intgHar <- RenameIdents(intgHar, new.cl)
+intgHar$T_clusters <- Idents(intgHar)
+
+markers <- c("PTPRC", "CD3E", "CD8A", "CD4", "NCAM1",
+             "JUN", "TOX", "STAT1", "TBX21", "FOXP3", "TCF7", "EOMES",
+             "TNFRSF4", "HAVCR2", "ENTPD1", "NT5E", "CTLA4", "PDCD1", "LAG3", "TIGIT",
+             "BTLA", "ITGAE", "CCR7", "IL7R", "CD28", "CD27",
+             "CD38", "HLA-DRA", "MAPK14", "TMEM173", "CD40", "TNFRSF9", "ICOS", "GZMB", "IL2RA", "GZMK",
+             "CXCR3", "CCR5",
+             "B3GAT1", "KLRG1",
+             "MKI67", "MAPK1",
+             "H2AFX"
+             )
+
+# Define T cell types based on (CD8A or CD8B) or CD4 expression
+data <- FetchData(intgHar, 
+                  vars = c("Samples", markers, "CD8B"), 
+                  slot = "data") %>% 
+  mutate(CellType = ifelse((CD8A>0 | CD8B>0) & CD4==0, "CD8",
+                       ifelse(CD8A==0 & CD8B==0 & CD4>0, "CD4",
+                              ifelse((CD8A>0 | CD8B>0) & CD4>0, "DP",
+                                     "DN"))))
+data$Sample <- gsub("_ACTP", "",  data$Sample)
+data$Sample <- gsub("Neo", "NeoTIL", data$Sample)
+data$Sample <- gsub("ATA", "ATATIL", data$Sample)
+
+splOrder <- c("NeoTIL.14MH", "NeoTIL.13LN", "ATATIL.13LN", "NeoTIL.13P4", "NeoTIL.0ZMN", "NeoTIL.1IJX")
+data$CellType <- factor(data$CellType, levels = c("CD8", "CD4", "DP", "DN"))
+data$Sample <- factor(data$Sample, levels = splOrder)
+
+rm(intgHar); invisible(gc()); gc()
+
+```
+
+
+## Heatmaps of selected markers for selected CellType
+```{r heatmaps}
+
+# Get average expression of markers per cell type
+avg.expression <- function(celltype, name) {
+  df <- data %>% filter(CellType == celltype) %>% group_by(Sample) %>% summarise_at(vars(markers), mean)
+  write.table(df, paste0(name, ".cells_of_ACTP_average.marker.expression_20220809.txt"),
+              sep = "\t", col.names = T, row.names = F)
+  print(max(colMaxs(as.matrix(df[sapply(df, is.numeric)]))))
+  return(df)
+}
+cd8.avg <- avg.expression("CD8", "CD8")
+cd4.avg <- avg.expression("CD4", "CD4")
+cd3.avg <- data %>% group_by(Sample) %>% summarise_at(vars(markers), mean)
+write.table(cd3.avg, paste0("CD3", ".cells_of_ACTP_average.marker.expression_20220809.txt"),
+              sep = "\t", col.names = T, row.names = F)
+
+# Get max exp value across all markers
+max(colMaxs(as.matrix(cd3.avg[sapply(cd3.avg, is.numeric)]))) 
+
+# Prepare data for heatmap
+avg.exp.for.hm <- function(dfAvg){
+  dfLong <- dfAvg %>%
+    pivot_longer(cols = markers, names_to = "gene", values_to = "RNAmean", values_drop_na = FALSE) %>% 
+    filter(gene == markers)
+  dfLong$gene <- factor(dfLong$gene, levels = markers)
+  return(dfLong)  
+}
+cd3 <- avg.exp.for.hm(cd3.avg) %>% rownames_to_column(var = "index")
+cd8 <- avg.exp.for.hm(cd8.avg) %>% rownames_to_column(var = "index")
+cd4 <- avg.exp.for.hm(cd4.avg) %>% rownames_to_column(var = "index")
+
+# Plot heatmap with viridis color
+hm <- function(DF, cellLabel) {
+  DF$Sample <- factor(DF$Sample, levels = rev(splOrder))
+  ggplot(DF, aes(x = gene, y = Sample, fill = RNAmean)) +
+  geom_tile(color = "grey", lwd = 0.01, linetype = 1) +
+  coord_fixed() +
+  scale_x_discrete(position = "top") +
+  scale_fill_viridis() +
+  #scale_fill_gradient(low = "black", high = "yellow") +
+  ggtitle(paste(cellLabel, "cells")) +
+  xlab("") +
+  ylab("") +
+  theme_classic() +
+  theme(axis.text.x.top = element_text(angle = 90, size = 10, hjust = -0.1, vjust = 0.5),
+        axis.ticks = element_blank())
+}
+
+pdf("Heatmap.viridis_of_normalized_selected_markers_for_CD3-CD8-CD4.cells_in_ACTP_20220809.pdf",
+    width = 14, height = 4)
+hm(cd3, "CD3")
+hm(cd8, "CD8")
+hm(cd4, "CD4")
+dev.off()
+
+
+# Plot heatmap with black-yellow color
+hm2 <- function(DF, cellLabel) {
+  DF$Sample <- factor(DF$Sample, levels = rev(splOrder))
+  ggplot(DF, aes(x = gene, y = Sample, fill = RNAmean)) +
+  geom_tile(color = "grey", lwd = 0.01, linetype = 1) +
+  coord_fixed() +
+  scale_x_discrete(position = "top") +
+  #scale_fill_viridis() +
+  scale_fill_gradient(low = "black", high = "yellow") +
+  ggtitle(paste(cellLabel, "cells")) +
+  xlab("") +
+  ylab("") +
+  theme_classic() +
+  theme(axis.text.x.top = element_text(angle = 90, size = 10, hjust = -0.1, vjust = 0.5),
+        axis.ticks = element_blank())
+}
+
+pdf("Heatmap.blackyellow_of_normalized_selected_markers_for_CD3-CD8-CD4.cells_in_ACTP_20220809.pdf",
+    width = 14, height = 4)
+hm2(cd3, "CD3")
+hm2(cd8, "CD8")
+hm2(cd4, "CD4")
+dev.off()
+
+```
+
+
+
+```{r scatter plot, fig.width=5, fig.height=3}
+
+# Prepare protein expression long data frames
+cytof <- read_table("../CyTOF_mean_expression_20220808.txt")
+cytof$Sample <- factor(cytof$Sample, levels = splOrder)
+cytof$Antibody <- as.factor(cytof$Antibody)
+cytof$Antibody <- factor(cytof$Antibody, levels = unique(cytof$Antibody))
+
+cytofOrder <- c(levels(cytof$Antibody))
+
+cytof.long <- function(population) {
+  CT.long <- cytof %>% filter(Population == population & Antibody != "143Nd_CD45ra") %>% 
+    select(Sample, Antibody, Mean)
+}
+CTcd3 <- cytof.long("CD3") %>% rownames_to_column(var = "index")
+CTcd8 <- cytof.long("CD8") %>% rownames_to_column(var = "index")
+CTcd4 <- cytof.long("CD4") %>% rownames_to_column(var = "index")
+
+# Join long df of scRNAseq and CyTOF
+CD3 <- left_join(cd3, CTcd3, by = "index", suffix = c(".scRNAseq", ".CyTOF"))
+CD8 <- left_join(cd8, CTcd8, by = "index", suffix = c(".scRNAseq", ".CyTOF"))
+CD4 <- left_join(cd4, CTcd4, by = "index", suffix = c(".scRNAseq", ".CyTOF"))
+
+# Marker categories for scatter plots
+lineage <- c("PTPRC", "CD3E", "CD8A", "CD4", "NCAM1")
+TFs <- c("JUN", "TOX", "STAT1", "TBX21", "FOXP3", "TCF7", "EOMES")
+immuneCheckpoint <- c("TNFRSF4", "HAVCR2", "ENTPD1", "NT5E", "CTLA4", "PDCD1", "LAG3", "TIGIT")
+naive.memory <- c("BTLA", "ITGAE", "CCR7", "IL7R", "CD28", "CD27")
+activation <- c("CD38", "HLA-DRA", "MAPK14", "TMEM173", "CD40", "TNFRSF9", "ICOS", "GZMB", "IL2RA", "GZMK")
+chemokineReceptor <- c("CXCR3", "CCR5")
+exhaustion.inhibition <- c("B3GAT1", "KLRG1")
+proliferation.DNArepair <- c("MKI67", "MAPK1", "H2AFX")
+
+# Scatter plots
+  scatter.plot <- function(Df, category, catName, celltype) {
+    Dfr <- Df %>% filter(gene %in% category)
+    print(ggplot(Dfr, aes(x = RNAmean, y = log10(Mean))) +
+            geom_point(aes(colour = gene, shape = Sample.scRNAseq), size = 1.5) +
+            geom_smooth(aes(fill = gene), method = "lm", alpha = 0.2, size = 0.2) +
+            scale_shape_discrete("Sample") +
+            xlab("average of RNA level") +
+            ylab("average of log10(Antibody level)") +
+            ggtitle(paste(celltype, "-", catName, "markers"))
+         )
+    rm(Dfr); invisible(gc()); gc()
+  }
+
+# 1) lineage
+pdf("Scatter.plots_lineage.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 6, height = 5)
+scatter.plot(CD3, lineage, "lineage", "CD3 cells")
+scatter.plot(CD8, lineage, "lineage", "CD8 cells")
+scatter.plot(CD4, lineage, "lineage", "CD4 cells")
+dev.off()
+
+# 2) TFs
+pdf("Scatter.plots_TF.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 6, height = 5)
+scatter.plot(CD3, TFs, "transcription factor", "CD3 cells")
+scatter.plot(CD8, TFs, "transcription factor", "CD8 cells")
+scatter.plot(CD4, TFs, "transcription factor", "CD4 cells")
+dev.off()
+
+# 3) immuneCheckpoint
+pdf("Scatter.plots_immuneCheckpoint.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 6, height = 4)
+scatter.plot(CD3, immuneCheckpoint, "immune checkpoint", "CD3 cells")
+scatter.plot(CD8, immuneCheckpoint, "immune checkpoint", "CD8 cells")
+scatter.plot(CD4, immuneCheckpoint, "immune checkpoint", "CD4 cells")
+dev.off()
+
+# 4) naive.memory
+pdf("Scatter.plots_naive.memory.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 6, height = 4)
+scatter.plot(CD3, naive.memory, "naive/memory", "CD3 cells")
+scatter.plot(CD8, naive.memory, "naive/memory", "CD8 cells")
+scatter.plot(CD4, naive.memory, "naive/memory", "CD4 cells")
+dev.off()
+
+# 5) activation
+pdf("Scatter.plots_activation.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 6, height = 5)
+scatter.plot(CD3, activation, "activation", "CD3 cells")
+scatter.plot(CD8, activation, "activation", "CD8 cells")
+scatter.plot(CD4, activation, "activation", "CD4 cells")
+dev.off()
+
+# 6) chemokine receptor
+pdf("Scatter.plots_chemokine.receptor.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 6, height = 3.5)
+scatter.plot(CD3, chemokineReceptor, "chemokine.receptor", "CD3 cells")
+scatter.plot(CD8, chemokineReceptor, "chemokine.receptor", "CD8 cells")
+scatter.plot(CD4, chemokineReceptor, "chemokine.receptor", "CD4 cells")
+dev.off()
+
+# 7) exhaustion.inhibition
+pdf("Scatter.plots_exhaustion.inhibition.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 5, height = 3.5)
+scatter.plot(CD3, exhaustion.inhibition, "exhaustion.inhibition", "CD3 cells")
+scatter.plot(CD8, exhaustion.inhibition, "exhaustion.inhibition", "CD8 cells")
+scatter.plot(CD4, exhaustion.inhibition, "exhaustion.inhibition", "CD4 cells")
+dev.off()
+
+# 8) proliferation.DNArepair
+pdf("Scatter.plots_proliferation.DNArepair.markers_scRNAseq.vs.CyTOF_in-CD3-CD8-CD4.cells_of.ACTP_20220809.pdf",
+    width = 5, height = 3.5)
+scatter.plot(CD3, proliferation.DNArepair, "proliferation.DNArepair", "CD3 cells")
+scatter.plot(CD8, proliferation.DNArepair, "proliferation.DNArepair", "CD8 cells")
+scatter.plot(CD4, proliferation.DNArepair, "proliferation.DNArepair", "CD4 cells")
+dev.off()
+
+```
+
+
+# Heatmap of correlation matrices between CyTOF and scRNAseq
+```{r correlation matrix heatmap, fig.width=20, fig.height=20}
+
+# Prepare gene expression matrix for correlation heatmap
+cd3.mat <- cd3.avg %>% column_to_rownames(var = "Sample") %>% as.matrix()
+cd8.mat <- cd8.avg %>% column_to_rownames(var = "Sample") %>% as.matrix()
+cd4.mat <- cd4.avg %>% column_to_rownames(var = "Sample") %>% as.matrix()
+
+# Prepare protein expression matrix for correlation heatmap
+cytof.matrix <- function(population) {
+  CT.mat <- cytof %>% filter(Population == population) %>% 
+    select(Sample, Antibody, Mean) %>% 
+    pivot_wider(names_from = Antibody, values_from = Mean) %>% 
+    select(Sample, rev(cytofOrder)) %>% 
+    column_to_rownames(var = "Sample") %>% as.matrix()
+  #return(CT.mat)
+}
+CTcd3.mat <- cytof.matrix("CD3")
+CTcd8.mat <- cytof.matrix("CD8")
+CTcd4.mat <- cytof.matrix("CD4")
+
+# Calculate spearman correlations
+corr.cd3 <- cor(CTcd3.mat, cd3.mat, method = "spearman") %>% replace(is.na(.), 0) %>% round(2)
+corr.cd8 <- cor(CTcd8.mat, cd8.mat, method = "spearman") %>% replace(is.na(.), 0) %>% round(2)
+corr.cd4 <- cor(CTcd4.mat, cd4.mat, method = "spearman") %>% replace(is.na(.), 0) %>% round(2)
+head(corr.cd3,5)
+
+# Plot correlation matrix heatmap
+corr.hm <- function(corrMat, hmTitle) {
+  heatmaply_cor(corrMat, limits = c(-1,1), colors = viridis,
+                cellnote = corrMat, cellnote_size = 10, cellnote_textposition = "middle center",
+                xlab = "scRNAseq", ylab = "CyTOF", main = hmTitle,
+                k_row = 1, k_col = 1,
+                Rowv = FALSE, Colv = FALSE, #TRUE for hierarchical clustering
+                fontsize_row = 12, fontsize_col = 12, branches_lwd = 0.2,
+                plot_method = "ggplot",
+                file = paste0("Correlation.matrix.heatmap_scRNAseq.vs.CyTOF_of_", hmTitle, "_in.ACTP_20220809.html"))
+}
+
+corr.hm(corr.cd3, "CD3.cells")
+corr.hm(corr.cd8, "CD8.cells")
+corr.hm(corr.cd4, "CD4.cells")
+
+```
+
+

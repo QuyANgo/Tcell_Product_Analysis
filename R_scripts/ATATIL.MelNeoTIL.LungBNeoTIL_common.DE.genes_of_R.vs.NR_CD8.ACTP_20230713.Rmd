@@ -1,0 +1,323 @@
+---
+title: "ATATIL.MelNeoTIL.LungBNeoTIL common DE.genes of R.vs.NR in CD8.ACTP - 20230713"
+author: "Quy A. Ngo"
+date: "13-Jul-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+setwd("/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX/ATATIL.MelNeoTIL.LungBNeoTIL_R.vs.NR_synthesis/20230713")
+mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX"
+
+`%nin%` <- Negate(`%in%`)
+```
+
+
+```{r load libraries, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+#library(Seurat)
+#library(superheat)
+library(pheatmap)
+library(tidyverse)
+#library(janitor)
+library(stringr)
+library(scales)
+library(ggpubr)
+library(cowplot)
+library(patchwork)
+#library(EnhancedVolcano)
+library(RColorBrewer)
+library(randomcoloR)
+library(viridis)
+#library(rstatix)
+
+# library(knitr)
+# library(kableExtra)
+# library(reactable)
+
+```
+
+
+```{r heatmap colors}
+
+paletteLength <- 256
+paletteLength2 <- 316
+
+l2fcColor = colorRampPalette(c("royalblue", "white", "brown1"))(256)
+padjColor <- viridis_pal()(316)
+
+
+```
+
+
+```{r load DE tables}
+
+# load DE tables
+Ata <- read.table("../../ATATIL_R_vs_NR/20230525/ATATIL_CD8.ACTP_BOR_Responder_vs_NonResponder_LR.test_fdr5.DEgenes_10pc.cells_20230525.txt", sep = "\t", header = T) %>% 
+  filter(padj <= 0.01) %>% 
+  select(gene, log2FC, padj)
+AtaUP <- Ata %>% filter(log2FC > 0)
+AtaDN <- Ata %>% filter(log2FC < 0)
+
+MelNeo <- read.table("../../MelNeoTIL_R_vs_NR/20230525/CD8.ACTP_MelNeoTIL_BOR_Responder_vs_NonResponder_LR.test_fdr5.DEgenes_10pc.cells_20230525.txt", sep = "\t", header = T) %>% 
+  filter(padj <= 0.01) %>%  
+  select(gene, log2FC, padj)
+MelNeoUP <- MelNeo %>% filter(log2FC > 0)
+MelNeoDN <- MelNeo %>% filter(log2FC < 0)
+
+LungBNeo <- read.table("../../LungBNeoTIL_R_vs_NR/20230712/CD8.ACTP_LungBNeoTIL_BOR_Responder_vs_NonResponder_LR.test_fdr1.DEgenes_10pc.cells_20230712.txt", sep = "\t", header = T) %>%  
+  select(gene, log2FC, padj)
+LungBNeoUP <- LungBNeo %>% filter(log2FC > 0)
+LungBNeoDN <- LungBNeo %>% filter(log2FC < 0)
+
+```
+
+
+# DE fdr0.01
+```{r join DE tables}
+
+# join all DE tables
+# 1. Common DE genes
+all <- Ata %>% 
+  full_join(MelNeo, by = "gene", suffix = c("_ATA", "_MelNeo")) %>%
+  full_join(LungBNeo, by = "gene") %>% 
+  data.table::setnames(c("log2FC", "padj"), c("log2FC_LungBNeo", "padj_LungBNeo")) %>% 
+  filter((log2FC_ATA>0 & log2FC_MelNeo>0 & log2FC_LungBNeo>0) | # all UP
+         (log2FC_ATA<0 & log2FC_MelNeo<0 & log2FC_LungBNeo<0)) # all DN
+
+write.table(all, "CD8.ACTP_common.significant_fdr1.DEgenes_among_ATATIL.MelNeoTIL.LungBNeoTIL_of_R.vs.NR_20230713.txt",
+            sep = "\t", append = F, quote = F, row.names = F, col.names = T)
+
+# split table into UP & DN according to log2FC
+all.UP <- all %>% filter(log2FC_ATA > 0)
+all.DN <- all %>% filter(log2FC_ATA < 0)
+
+
+# # 2. Cohort-specific DE genes 
+# onlyMelUP <- MelUP %>% filter(gene %nin% LungUP$gene)
+# onlyMelDN <- MelDN %>% filter(gene %nin% LungDN$gene)
+# onlyMel <- rbind(onlyMelUP, onlyMelDN)
+# 
+# onlyLungUP <- LungUP %>% filter(gene %nin% MelUP$gene)
+# onlyLungDN <- LungDN %>% filter(gene %nin% MelDN$gene)
+# onlyLung <- rbind(onlyLungUP, onlyLungDN)
+# 
+# writeTable <- function(i,k) {
+#   write.table(i, paste0("CD8.ACTP_", k, "_fdr1.DEgenes_20230526.txt"),
+#             sep = "\t", append = F, quote = F, row.names = F, col.names = T)
+# }
+# 
+# mapply(writeTable, list(onlyMel, onlyLung), list('only_MelNeoTIL.vs.ATATIL', 'only_LungNeoTIL.vs.SolTIL'))
+# 
+# rm(Mel, Lung, onlyMelUP, onlyMelDN, onlyLungUP, onlyLungDN)
+
+```
+
+
+
+# selected genes
+```{r gene list}
+
+lineage = c("CD8A", "CD8B", "KLRD1", "KIR2DL4", "NCAM1", "TRGV5", "CD3E")
+naive.memory = c("SELL", "CCR7", "IL7R", "CD28", "FAS", "CD27", "ITGAE", "ITGAL", "ITGAM", "ITGAX", "LTB")
+exhaustion.inhibition = c("PDCD1", "TIGIT", "HAVCR2", "LAG3", "CTLA4", "CD244", "KLRG1", "TNFRSF14", "BTLA", "CD160")
+activation = c("CD38", "CD28", "ENTPD1", "CD69", "IL2RA", "ICOS", "TNFRSF4", "TNFRSF9", "HLA-DRA", "CD40LG")
+effector.cytokine = c("GZMA", "GZMB", "GZMH", "GZMK", "GZMM", "PRF1", "NKG7", "GNLY", "IFNG", "IL2", "FASLG", "TNF") #"IL17A", 
+effector.molecule = c("CCL3", "CCL4", "CCL5", "CST7")
+transcription.factor = c("LEF1", "TCF7", "EOMES", "notR4A1", "TBX21", "PRDM1", "TOX", "GATA3", "ID2", "ID3", "ZNF683", "FOXP3", "MKI67", "TOP2A", "FOS", "JUN")
+NK.gamma.delta = c("TRGV9", "TRDV2", "KLRB1", "KLRC3")
+chemokine.receptor = c("CCR4", "CCR5", "CXCR3", "CXCR4")
+co.stimulation = c("CD80", "CD86", "CD83")
+to.be.classified = c("CD74", "CD52", "ANXA1", "VCAM1", "CD200", "ISG15", "ITGA4", "IL12RB1", "IL12RB2")
+AH <- c("B3GAT1", "ITGAE", "GZMK", "FOXP3", "CTLA4", "KLRG1", "TCF7", "TNFSF9", "JUN", "CD27", "CD40", "MKI67", "BTLA", "HLA-DRA", "HLA-DRB1", "HLA-DRB5")
+        
+Mcat = list(lineage, naive.memory, exhaustion.inhibition, activation, effector.cytokine, effector.molecule, transcription.factor, NK.gamma.delta, chemokine.receptor, co.stimulation, to.be.classified, AH)
+Mname = list("lineage", "naive.memory", "exhaustion.inhibition", "activation", "effector.cytokine", "effector.molecule", "transcription.factor", "NK.gamma.delta", "chemokine.receptor", "co.stimulation", "to.be.classified", "AH.selection")
+
+selList <- unlist(Mcat, recursive = FALSE)
+
+```
+
+
+
+```{r join selected genes}
+
+# 1. Common selected DE genes
+sel <- all %>%  filter(gene %in% selList)
+
+write.table(sel, "CD8.ACTP_common.significant_fdr1.selected.markers_of_ATATIL.MelNeoTIL.LungBNeoTIL_20230713.txt",
+            sep = "\t", append = F, quote = F, row.names = F, col.names = T)
+
+sel.UP <- sel %>% filter(log2FC_ATA > 0)
+sel.DN <- sel %>% filter(log2FC_ATA < 0)
+
+# # 2. Cohort-specific selected DE genes
+# onlyMel.sel <- onlyMel %>% filter(gene %in% selList)
+# onlyLung.sel <- onlyLung %>% filter(gene %in% selList)
+# 
+# onlyMel.selUP <- onlyMel.sel %>% filter(log2FC > 0)
+# onlyLung.selUP <- onlyLung.sel %>% filter(log2FC > 0)
+
+```
+
+
+
+```{r l2FC matrix}
+
+# 1. l2fc sel of common genes
+getMatrix.l2FC <- function(DElist) {
+  mat <- DElist %>% 
+    select(gene, log2FC_ATA, log2FC_MelNeo, log2FC_LungBNeo) %>% 
+    data.table::setnames(c("log2FC_ATA", "log2FC_MelNeo", "log2FC_LungBNeo"), 
+                         c("ATATIL_R.vs.NR", "MelNeoTIL_R.vs.NR", "LungBNeoTIL_R.vs.NR")) %>% 
+    column_to_rownames(var = "gene") %>% as.matrix()
+  return(mat)
+} 
+
+l2fc.all <- getMatrix.l2FC(all)
+l2fc.sel <- getMatrix.l2FC(sel)
+
+# l2FC color break
+l2fc.allBreak <- c(seq(min(l2fc.all), 0, length.out=ceiling(paletteLength/2) + 1), 
+                   seq(max(l2fc.all)/paletteLength, max(l2fc.all), length.out=floor(paletteLength/2)))
+
+l2fc.selBreak <- c(seq(min(l2fc.sel), 0, length.out=ceiling(paletteLength/2) + 1), 
+                   seq(max(l2fc.sel)/paletteLength, max(l2fc.sel), length.out=floor(paletteLength/2)))
+
+
+# # 2. Mel-specific genes
+# Mel.l2fc.sel <- onlyMel.sel %>% select(-padj) %>%
+#   data.table::setnames("log2FC", "onlyMel_NeoTIL.vs.ATATIL") %>%
+#   column_to_rownames(var = "gene") %>%
+#   as.matrix()
+# 
+# 
+# # 3. Lung-specific genes
+# Lung.l2fc.sel <- onlyLung.sel %>% select(-padj) %>%
+#   data.table::setnames("log2FC", "onlyLung_NeoTIL.vs.SolTIL") %>%
+#   column_to_rownames(var = "gene") %>%
+#   as.matrix()
+
+# l2fc.selMax <- max(max(l2fc.sel), max(Mel.l2fc.sel), max(Lung.l2fc.sel))
+# l2fc.selMin <- min(min(l2fc.sel), min(Mel.l2fc.sel), min(Lung.l2fc.sel))
+# l2fc.selBreak <- c(seq(l2fcMin, 0, length.out=ceiling(paletteLength/2) + 1), 
+#                seq(l2fcMax/paletteLength, l2fcMax, length.out=floor(paletteLength/2)))
+
+```
+
+
+
+```{r pAdj matrix}
+
+# 1. p-adj sel common
+getMatrix.pAdj <- function(DElist) {
+  mat <- DElist %>% 
+    select(gene, padj_ATA, padj_MelNeo, padj_LungBNeo) %>% 
+    mutate(revPval_ATA = -log10(padj_ATA)) %>% 
+    mutate(revPval_MelNeo = -log10(padj_MelNeo)) %>% 
+    mutate(revPval_LungBNeo = -log10(padj_LungBNeo))
+
+  noInf_ATA <- mat %>% filter(revPval_ATA != Inf) %>% select(gene, revPval_ATA)  # this is to get the non-Inf max value
+  noInf_MelNeo <- mat %>% filter(revPval_MelNeo != Inf) %>% select(gene, revPval_MelNeo)
+  noInf_LungBNeo <- mat %>% filter(revPval_LungBNeo != Inf) %>% select(gene, revPval_LungBNeo)
+
+  mat <- mat %>%   
+    mutate(revPval_ATA = ifelse(revPval_ATA == Inf, max(noInf_ATA$revPval_ATA)+1, revPval_ATA)) %>% 
+    mutate(revPval_MelNeo = ifelse(revPval_MelNeo == Inf, max(noInf_MelNeo$revPval_MelNeo)+1, revPval_MelNeo)) %>%
+    mutate(revPval_LungBNeo = ifelse(revPval_LungBNeo == Inf, max(noInf_LungBNeo$revPval_LungBNeo)+1, revPval_LungBNeo)) %>%
+    select(gene, revPval_ATA, revPval_MelNeo, revPval_LungBNeo)
+
+  names(mat) <- c("gene", "ATATIL_R.vs.NR", "MelNeoTIL_R.vs.NR", "LungBNeoTIL_R.vs.NR")
+  mat <- mat %>% column_to_rownames(var = "gene") %>% as.matrix()
+
+  return(mat)
+}
+
+padj.all <- getMatrix.pAdj(all)
+padj.sel <- getMatrix.pAdj(sel)
+
+# padj color break
+padj.allBreak <- seq(min(padj.all), max(padj.all), 1)
+padj.selBreak <- seq(min(padj.sel), max(padj.sel), 1)
+
+
+# # 2. Mel-specific genes
+# Mel.padj.sel <- onlyMel.sel %>% select(-log2FC) %>%
+#   mutate(revPval_Mel = -log10(padj)) 
+# 
+# noInf_onlyMel_sel <- Mel.padj.sel %>% filter(revPval_Mel != Inf) %>% select(gene, revPval_Mel)  # this is to get the non-Inf max value
+# Mel.padj.sel <- Mel.padj.sel %>%   
+#   mutate(revPval_Mel = ifelse(revPval_Mel == Inf, max(noInf_onlyMel_sel$revPval_Mel)+1, revPval_Mel)) %>%
+#   select(gene, revPval_Mel) %>%
+#   data.table::setnames("revPval_Mel", "onlyMel_NeoTIL.vs.ATATIL") %>%
+#   column_to_rownames(var = "gene") %>%
+#   as.matrix()
+# 
+# 
+# # 3. Lung-specific genes
+# Lung.padj.sel <- onlyLung.sel %>% select(-log2FC) %>%
+#   mutate(revPval_Lung = -log10(padj)) 
+# 
+# noInf_onlyLung_sel <- Lung.padj.sel %>% filter(revPval_Lung != Inf) %>% select(gene, revPval_Lung)  # this is to get the non-Inf max value
+# Lung.padj.sel <- Lung.padj.sel %>%   
+#   mutate(revPval_Lung = ifelse(revPval_Lung == Inf, max(noInf_onlyLung_sel$revPval_Lung)+1, revPval_Lung)) %>%
+#   select(gene, revPval_Lung) %>%
+#   data.table::setnames("revPval_Lung", "onlyLung_NeoTIL.vs.SolTIL") %>%
+#   column_to_rownames(var = "gene") %>%
+#   as.matrix()
+
+```
+
+
+
+```{r print heatmap}
+
+plotHeatmap <- function(mat, matType, gapRow, colorType, breakVal, geneList, title, figWidth, figHeight) {
+  pdf(paste0("CD8.ACTP_ATATIL.MelNeoTIL.LungBNeoTIL_heatmap.", matType, "_for_common_R.vs.NR_fdr1.", geneList, ".genes_20230713.pdf"),
+       width = figWidth, height = figHeight)
+  print(pheatmap(mat, cluster_rows = F, cluster_cols = F,  na_col = "grey10", 
+                 gaps_row = length(gapRow), # CHANGE THIS!!!!!
+                 color = colorType,
+                 # use floor and ceiling to deal with even/odd length pallettelengths
+                 breaks = breakVal,
+                 angle_col = 315, show_rownames = T,
+                 fontsize_row = 8,
+                 main = title
+                 )
+  )
+  dev.off()
+}
+
+plotHeatmap(l2fc.sel, "log2FC", sel.UP$gene, l2fcColor, l2fc.selBreak, "selected", "l2FC.sel", 1.9, 3.5)
+plotHeatmap(l2fc.all, "log2FC", all.UP$gene, l2fcColor, l2fc.allBreak, "DE", "l2FC.DE", 2.3, 35)
+plotHeatmap(padj.sel, "pAdj", sel.UP$gene, padjColor, padj.selBreak, "selected", "pAdj.sel", 1.9, 3.5)
+plotHeatmap(padj.all, "pAdj", all.UP$gene, padjColor, padj.allBreak, "DE", "pAdj.DE", 2.3, 35)
+
+
+# pdf("CD8.ACTP_heatmap.log2FC_for_only.Mel_NeoTIL.vs.conventional_fdr1.selected.genes_20230713.pdf",
+#     width = 1.5, height = 5.5)
+# pheatmap(Mel.l2fc.sel, cluster_rows = F, cluster_cols = F,  na_col = "grey10", 
+#                     gaps_row = length(onlyMel.selUP$gene), # CHANGE THIS!!!!!
+#                     color = l2fcColor,
+#                     breaks = l2fcBreak,
+#                     angle_col = 315, show_rownames = T,
+#                     width = 1.5, height = 5.5, fontsize_row = 9,
+#                     main = "l2FC.sel"
+#                    )
+# dev.off()
+# pdf("CD8.ACTP_heatmap.log2FC_for_only.Lung_NeoTIL.vs.conventional_fdr1.selected.genes_20230713.pdf",
+#     width = 1.5, height = 5.5)
+# pheatmap(Lung.l2fc.sel, cluster_rows = F, cluster_cols = F,  na_col = "grey10", 
+#                      gaps_row = length(onlyLung.selUP$gene), # CHANGE THIS!!!!!
+#                      color = l2fcColor,
+#                      breaks = l2fcBreak,
+#                      angle_col = 315, show_rownames = T,
+#                      width = 1.5, height = 5.5, fontsize_row = 9,
+#                      main = "l2FC.sel"
+#                     )
+# dev.off()
+
+```
+
+

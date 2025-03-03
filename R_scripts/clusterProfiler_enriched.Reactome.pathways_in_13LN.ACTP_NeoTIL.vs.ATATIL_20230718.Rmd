@@ -1,0 +1,366 @@
+---
+title: "clusterProfiler - enriched Reactome pathways for common TCRs in 13LN.ACTP NeoTIL.vs.ATATIL 20230718"
+author: "Quy A. Ngo"
+date: "18-Jul-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+setwd("/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX/clusterProfiler/20230718_13LN.NeoTIL.ATATIL_commonTCRs/")
+#mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX"
+
+`%nin%` <- Negate(`%in%`)
+```
+
+
+```{r load libraries}
+
+library(tidyverse)
+library(GGally)
+library(hrbrthemes)
+library(clusterProfiler)
+library(enrichplot)
+library(patchwork)
+library(ggpubr)
+library(cowplot)
+library(data.table)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(DOSE)
+library(msigdbr)
+
+```
+
+
+```{r load DE tables}
+
+# 1. All common TCRs NeoTIL vs. ATATIL
+# all <- read.table("../../all.NeoTIL_vs_ATATIL/20230524_with13LN/CD8.ACTP_ATATIL.allNeoTIL_Cohort_allNeoTIL_vs_ATATIL_LR.test_all.DEgenes_10pc.cells_20230525.txt", sep = "\t", header = T) %>% arrange(-log2FC)
+
+all <- read.table("../../13LN_cellState.ATATIL.NeoTIL/20230717/13LN.ACTP_NeoTIL_vs_ATATIL_all.commonTCRs_LR.test_fdr1.DEgenes_0.1cells_20230717.txt", sep = "\t", header = T) %>% 
+  filter(abs(log2FC) >= 0.25) %>% 
+  dplyr::select(gene, log2FC)
+allUP <- all %>% filter(log2FC > 0.25)
+allDN <- all %>% filter(log2FC < 0.25)
+
+# 2. Selected common TCRs NeoTIL vs. ATATIL
+# sel <- read.table("../../sel.NeoTIL_vs_sel.SolTIL/20230531/CD8.ACTP_sel.SolNeoTIL_Cohort_selNeoTIL_vs_selSolTIL_LR.test_fdr1.DEgenes_10pc.cells_20230531.txt", sep = "\t", header = T) %>% arrange(-log2FC)
+
+sel <- read.table("../../13LN_cellState.ATATIL.NeoTIL/20230717/13LN.ACTP_NeoTIL_vs_ATATIL_selected.commonTCRs_LR.test_fdr1.DEgenes_0.1cells_20230717.txt", sep = "\t", header = T) %>% 
+  filter(abs(log2FC) >= 0.25) %>% 
+  dplyr::select(gene, log2FC)
+selUP <- sel %>% filter(log2FC > 0.25)
+selDN <- sel %>% filter(log2FC < 0.25)
+
+```
+
+
+# Gene lists
+```{r convert gene Symbol to Ensembl & Entrez IDs}
+
+IDconvert <- function(DE) {
+  ids <- bitr(c(DE$gene), fromType = "SYMBOL", toType = c("ENTREZID"), OrgDb = "org.Hs.eg.db")
+  # dedup_ids <- ids[!duplicated(ids[c("ENTREZID")]), ]
+  # dedup_ids <- ids[!duplicated(ids[c("SYMBOL")]), ]
+  # dedup_ids <- na.omit(dedup_ids)
+  # 
+  ids <- ids %>% left_join(DE, by = c("SYMBOL" = "gene"))
+  
+  gene.list <- ids$log2FC
+  names(gene.list) <- ids$ENTREZID
+  
+  return(gene.list)
+}
+
+# allall.list <- IDconvert(allall)
+# allsel.list <- IDconvert(allsel)
+
+allUP.list <- IDconvert(allUP)
+allDN.list <- IDconvert(allDN)
+selUP.list <- IDconvert(selUP)
+selDN.list <- IDconvert(selDN)
+
+```
+
+
+# enriched Reactome pathway analysis
+```{r Reactome, fig.width=10, fig.height=10}
+
+Reactome <- function(gene.list, DElistName, expDir) {
+  x <- enrichPathway(gene = c(names(gene.list)),
+                     pvalueCutoff = 0.01,
+                     readable = T)
+  
+  write.table(as.data.frame(x), paste0("Enriched.fdr1_Reactome.pathways_in_", DElistName, "_of_13LN.ACTP_for_fdr1_l2FC0.25_", expDir, ".DEgenes_NeoTIL.vs.ATATIL_20230718.txt"),
+              sep = "\t", quote = F, row.names = F, col.names = T)
+
+  pdf(paste0("Enriched.fdr1_top_Reactome.pathways_in_", DElistName, "_of_13LN.ACTP_for_fdr1_l2FC0.25_", expDir, ".DEgenes_NeoTIL.vs.ATATIL_20230718.pdf"),
+      height = 12, width = 10)
+  print(barplot(x, showCategory = 20))
+  print(dotplot(x, showCategory = 20))
+  dev.off()
+  
+  return(as.data.frame(x))
+}
+
+allUP <- Reactome(allUP.list, "all.commonTCRs", "UP")
+allDN <- Reactome(allDN.list, "all.commonTCRs", "DN") # If l2FC 0.5 -> Error in ans[ypos] <- rep(yes, length.out = len)[ypos] : replacement has length zero -> only 140 genes, too few for enriched pathway analysis
+selUP <- Reactome(selUP.list, "selected.commonTCRs", "UP")
+selDN <- Reactome(selDN.list, "selected.commonTCRs", "DN")
+
+```
+
+
+
+# common and TCRset-specific enriched pathways
+```{r common & different enriched pathways}
+
+# # extract DN pathways present in UP pathways
+# all.UPDN <- allUP %>% inner_join(allDN, by = c("ID", "Description"), suffix = c("_UP", "_DN"))
+# sel.UPDN <- selUP %>% inner_join(selDN, by = c("ID", "Description"), suffix = c("_UP", "_DN"))
+# 
+# # subtracted UPDN pathways from each UP and DN pathway
+# allUP <- allUP %>% filter(ID %nin% all.UPDN$ID)
+# allDN <- allDN %>% filter(ID %nin% all.UPDN$ID)
+# selUP <- selUP %>% filter(ID %nin% sel.UPDN$ID)
+# selDN <- selDN %>% filter(ID %nin% sel.UPDN$ID)
+
+# get common/specific UP/DN all+sel TCRset pathways 
+allsel.UP <- allUP %>% inner_join(selUP, by = c("ID", "Description"), suffix = c("_all", "_selected")) # 17 common act ptwy
+allsel.DN <- allDN %>% inner_join(selDN, by = c("ID", "Description"), suffix = c("_all", "_selected")) # 9 common rep ptwy
+onlyall.UP <- allUP %>% filter(ID %nin% selUP$ID) # 58 act ptwy
+onlyall.DN <- allDN %>% filter(ID %nin% selDN$ID) # 42 rep ptwy
+onlysel.UP <- selUP %>% filter(ID %nin% allUP$ID) # 3 act ptwy
+onlysel.DN <- selDN %>% filter(ID %nin% allDN$ID) # 0 rep ptwy
+
+
+# check for common allsel/onlyall/onlysel UPDN pathways
+allsel.UPDN <- inner_join(allsel.UP, allsel.DN, by = c("ID", "Description"), suffix = c("_UP", "_DN")) # 0 ptwy :-)
+
+# Save all comparisons
+save.comparison <- function(df, dfType, condition, comp) {
+  write.table(df, paste0(dfType, "_enriched.fdr1_", condition, "_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_", comp, "_20230718.txt"),
+              sep = "\t", quote = F, row.names = F, col.names = T)
+}
+
+save.comparison(allsel.UP, "Common", "activated", "both.commonTCR.sets_of_13LN.ACTP_NeoTIL.vs.ATATIL")
+save.comparison(allsel.DN, "Common", "repressed", "both.commonTCR.sets_of_13LN.ACTP_NeoTIL.vs.ATATIL")
+save.comparison(onlyall.UP, "Only.all.commonTCRs", "activated", "13LN.ACTP_NeoTIL.vs.ATATIL")
+save.comparison(onlyall.DN, "Only.all.commonTCRs", "repressed", "13LN.ACTP_NeoTIL.vs.ATATIL")
+save.comparison(onlysel.UP, "Only.selected.commonTCRs", "activated", "13LN.ACTP_NeoTIL.vs.ATATIL")
+save.comparison(onlysel.DN, "Only.selected.commonTCRs", "repressed", "13LN.ACTP_NeoTIL.vs.ATATIL")
+
+```
+
+
+
+# NOT RUN !!! ranking common
+```{r ranking, fig.width=10, fig.height=15, eval=FALSE}
+
+## Function for ranking common GO/pathways in all & sel
+rankCommon <- function(df, ptwyClass, enrichClass) {
+  all <- df %>% arrange(p.adjust_all) %>% rownames_to_column(var = "rankall") %>% dplyr::select(rankall, ID, Description, p.adjust_all)
+  sel <- df %>% arrange(p.adjust_sel) %>% rownames_to_column(var = "ranksel") %>% dplyr::select(ranksel, ID, Description, p.adjust_sel)
+  allsel <- left_join(all, sel, by = c("ID", "Description"))
+  allsel$rankall <- as.numeric(allsel$rankall)
+  allsel$ranksel <- as.numeric(allsel$ranksel)
+  allsel <- allsel %>% mutate(rankGroup = ifelse(rankall <= 26 & ranksel <= 26, "top26.allsel",
+                                                   ifelse(rankall <= 26 & ranksel > 26, "top26.onlyall",
+                                                          ifelse(ranksel <= 26 & rankall > 26, "top26.onlysel",
+                                                                 "belowtop26.allsel"))))
+  allsel$rankGroup <- factor(allsel$rankGroup, levels = c("top26.allsel", "top26.onlyall", "top26.onlysel", "belowtop26.allsel"))
+  write.table(allsel, paste0("Coordinated.rankings_common.allsel_enriched.fdr1_", ptwyClass, enrichClass, "_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718b.txt"), 
+              sep = "\t", quote = F, row.names = F, col.names = T)
+  
+  p <- ggparcoord(allsel, columns = c(1,5), groupColumn = 7,
+                  mapping = aes(color = as.factor(rankGroup)),
+                  showPoints = T,
+                  scale = "globalminmax",
+                  title = paste0(ptwyClass),
+                  alphaLines = 0.3) +
+        scale_color_manual("rankGroup",
+                            values = c("brown1", "royalblue", "seagreen", "orange"),
+                            labels = levels(allsel$rankGroup)) +
+        scale_y_reverse() +
+        xlab("") + ylab("") +
+        theme(legend.position = "none", # none
+          axis.ticks.x = element_blank(),
+          axis.text.x = element_text(size = 12, face = "bold"),
+          plot.title = element_text(size = 14, colour = "blue", face = "bold", hjust = 0.25) #,
+          # panel.background = element_blank(),
+          # panel.grid.major.y = element_line(colour = "black", size = 0.25, linetype = "dotted"),
+          # panel.grid.minor = element_blank()
+         )
+  
+  return(p)
+}
+
+# Reactome
+rankAct <- rankCommon(allsel.UP, "activated", ".Reactome.pathways") +
+  ylab("rank of adjusted p-values") +
+  theme(axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14, face = "bold"))
+
+rankRpr <- rankCommon(allsel.DN, "repressed", ".Reactome.pathways") +
+  theme(axis.text.y = element_text(size = 12)#,
+        #axis.ticks.y = element_blank()
+        )
+# # GO
+# rankGoAct <- rankCommon(goallsel.UP, "upregulated.genes", ".GO.terms") +
+#   ylab("rank of adjusted p-values") +
+#   theme(axis.text.y = element_text(size = 12),
+#         axis.title.y = element_text(size = 14, face = "bold"))
+# 
+# rankGoRpr <- rankCommon(goallsel.DN, "downregulated.genes", ".GO.terms") +
+#   theme(axis.text.y = element_text(size = 12)#,
+#         #axis.ticks.y = element_blank()
+#         )
+
+## Get common legend
+# Reactome
+legend <- ggpubr::get_legend(rankAct +
+                             guides(fill = guide_legend(title.position = "top", ncol = 2, reverse = FALSE)
+                            ) + # number of legend columns
+            theme(legend.position = "bottom",
+                  legend.title = element_text(size = 14),
+                  legend.text = element_text(size = 12)
+                  )
+                            )
+# 
+# # GO
+# legendGO <- ggpubr::get_legend(rankGoAct +
+#                              guides(fill = guide_legend(title.position = "top", ncol = 2, reverse = FALSE)
+#                             ) + # number of legend columns
+#             theme(legend.position = "bottom",
+#                   legend.title = element_text(size = 14),
+#                   legend.text = element_text(size = 12)
+#                   )
+#                             )
+
+## Plot parallel coordinate
+# Reactome
+pdf(paste0("Parallel.coordinate.plot_of_common_enriched.fdr1_activated.and.repressed_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718b.pdf"), width = 11, height = 15)
+fig <- plot_grid(rankAct, rankRpr, 
+                 align = c("vh"), ncol = 2)
+
+fig_legend <- plot_grid(fig, legend, nrow = 2, rel_heights = c(10,1))
+
+annotate_figure(fig_legend, 
+                top = text_grob("
+                Common enriched Reactome pathways in all & sel of NeoTIL.vs.conventional
+                                ", 
+                                color = "black", face = "bold", size = 18)
+                )
+dev.off()
+# 
+# # GO
+# pdf(paste0("Parallel.coordinate.plot_of_common_enriched.fdr1_up.and.downregulated.genes_GO.termss_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718b.pdf"), width = 11, height = 15)
+# figGO <- plot_grid(rankGoAct, rankGoRpr, 
+#                  align = c("vh"), ncol = 2)
+# 
+# fig_legendGO <- plot_grid(figGO, legendGO, nrow = 2, rel_heights = c(10,1))
+# 
+# annotate_figure(fig_legendGO, 
+#                 top = text_grob("
+#                 Common enriched GO terms in all & sel of NeoTIL.vs.conventional
+#                                 ", 
+#                                 color = "black", face = "bold", size = 18)
+#                 )
+# dev.off()
+
+```
+
+
+# compareCluster
+```{r combine gene lists for compareCluster}
+
+## Combine entire gene lists of all & selected commonTCR sets
+allUP.df <- data.frame(Entrez = names(allUP.list), FC = allUP.list) %>% mutate(ptwyType = "activated") %>% mutate(TCRset = "all")
+allDN.df <- data.frame(Entrez = names(allDN.list), FC = allDN.list) %>% mutate(ptwyType = "repressed") %>% mutate(TCRset = "all")
+selUP.df <- data.frame(Entrez = names(selUP.list), FC = selUP.list) %>% mutate(ptwyType = "activated") %>% mutate(TCRset = "selected")
+selDN.df <- data.frame(Entrez = names(selDN.list), FC = selDN.list) %>% mutate(ptwyType = "repressed") %>% mutate(TCRset = "selected")
+allsel.df <- rbind(allUP.df, allDN.df, selUP.df, selDN.df)
+allsel.df$ptwyType <- factor(allsel.df$ptwyType, levels = c("activated", "repressed"))
+allsel.df$TCRset <- factor(allsel.df$TCRset, levels = c("all", "selected"))
+
+## comparecluster
+# reactome
+reactome <- compareCluster(Entrez~ptwyType+TCRset, data = allsel.df, fun = "enrichPathway", pvalueCutoff = 0.01)
+reactome@compareClusterResult$ptwyType <- factor(reactome@compareClusterResult$ptwyType, levels = c("activated", "repressed"))
+reactome@compareClusterResult$TCRset <- factor(reactome@compareClusterResult$TCRset, levels = c("all", "selected"))
+
+saveRDS(reactome, "compareCluster_enriched.fdr1_activated.and.repressed_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_all.and.selected_commonTCRs_in_13LN.ACTP_NeoTIL.vs.ATATIL_20230718.rds")
+
+#GO
+# goallsel.df <- allsel.df %>% mutate(geneDir = ifelse(ptwyType == "activated", "upregulated", "downregulated"))
+# goallsel.df$geneDir <- factor(goallsel.df$geneDir, levels = c("upregulated", "downregulated"))
+# GO <- compareCluster(Entrez~geneDir+cancer, data = goallsel.df, fun = "enrichGO", OrgDb='org.Hs.eg.db', pvalueCutoff = 0.01)
+
+```
+
+
+# plot all common enriched reactome pathways
+```{r plot top10 reactome, fig.width=8, fig.height=18}
+
+# # reactome
+# UP26 <- read.table("Coordinated.rankings_common.allsel_enriched.fdr1_activated.Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718b.txt", sep = "\t", header = T) %>%
+#   filter(rankGroup == "top26.allsel") %>% 
+#   slice_head(n=10) %>% 
+#   dplyr::select(ID, Description)
+# 
+# DN26 <- read.table("Coordinated.rankings_common.allsel_enriched.fdr1_repressed.Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718b.txt", sep = "\t", header = T) %>%
+#   filter(rankGroup == "top26.allsel") %>%
+#   slice_head(n=10) %>% 
+#   dplyr::select(ID, Description)
+# 
+# top26 <- reactome@compareClusterResult %>% filter(ID %in% c(UP26$ID, DN26$ID))
+# 
+# reactome.top26 <- reactome
+# reactome.top26@compareClusterResult <- top26
+
+comm <- reactome@compareClusterResult %>% filter(ID %in% c(allsel.UP$ID, allsel.DN$ID))
+reactome.comm <- reactome
+reactome.comm@compareClusterResult <- comm
+
+# plot top10 common for reactome
+p <- dotplot(reactome.comm, x = "TCRset", showCategory = 30) + 
+  ggplot2::facet_grid(~ptwyType) +
+  ggplot2::ggtitle(paste("Common significant enriched Reactome pathways of", "\n", "both TCRsets in 13LN.ACTP NeoTIL.vs.ATATIL"))
+p
+pdf("Dotplot_common_enriched_significant.fdr1_activated.and.repressed_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_all.and.selected.commonTCRs_in_13LN.ACTP_NeoTIL.vs.ATATIL_20230718.pdf", width = 8, height = 14)
+p
+dev.off()
+
+```
+
+
+# NOT RUN !!! plot top26 common GO
+```{r plot top26 GO, fig.width=8, fig.height=8, eval=FALSE}
+
+# GO
+goUP28 <- read.table("Coordinated.rankings_common.allsel_enriched.fdr1_upregulated.genes.GO.terms_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718b.txt", sep = "\t", header = T) %>%
+  filter(rankGroup == "top26.allsel") %>%
+  dplyr::select(ID, Description)
+
+goDN28 <- read.table("Coordinated.rankings_common.allsel_enriched.fdr1_downregulated.genes.GO.terms_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718b.txt", sep = "\t", header = T) %>%
+  filter(rankGroup == "top26.allsel") %>%
+  dplyr::select(ID, Description)
+
+gotop26 <- GO@compareClusterResult %>% filter(ID %in% c(goUP28$ID, goDN28$ID))
+
+GO.top26 <- GO
+GO.top26@compareClusterResult <- GO.top26
+
+# plot top26 common for GO
+p <- dotplot(GO.top26, x = "cancer", showCategory = 10) + 
+  ggplot2::facet_grid(~ptwyType) +
+  ggplot2::ggtitle(paste("Top significant common GO terms", "\n", "of both all&sel NeoTIL.vs.conventional protocol"))
+p
+pdf("Dotplot_top.significant_common.allsel_up.and.down.regulated.genes_GO.terms_for_fdr1_l2FC0.25_DEgenes_of_NeoTIL.vs.conventional_20230718.pdf", width = 8, height = 8)
+p
+dev.off()
+
+```
+
+

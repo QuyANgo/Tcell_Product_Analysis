@@ -1,0 +1,1210 @@
+---
+title: "13LN.ATATIL.NeoTIL cell state of common clones in ACTP - 20230717"
+author: "Quy A. Ngo"
+date: "17-Jul-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", include = FALSE, echo = FALSE, message = FALSE, warning = FALSE)
+options(future.globals.maxSize = 48000 * 1024^2)
+setwd("/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX/13LN_cellState.ATATIL.NeoTIL/20230717")
+```
+
+
+```{r load libraries}
+library(Seurat)
+library(harmony)
+
+library(Matrix)
+library(scater)
+library(scran)
+library(clustree)
+#library(leidenAlg)
+
+library(SingleR)
+library(celldex)
+
+library(UCell)
+library(AUCell)
+
+library(tidyverse)
+library(ggpattern)
+library(stringr)
+library(rstatix)
+library(ggpubr)
+library(cowplot)
+library(patchwork)
+library(EnhancedVolcano)
+library(scales)
+library(ggVennDiagram)
+library(plotly)
+library(RColorBrewer)
+library(randomcoloR)
+library(viridis)
+
+library(knitr)
+library(kableExtra)
+library(reactable)
+
+`%nin%` = Negate(`%in%`)
+```
+
+
+# 1. Get GEX data
+```{r load GEX data}
+
+## Load raw dataset (10x Genomics format)
+mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud"
+
+# get expression matrices
+get.sc.exp.mat <- function(i, ...){
+  dataDir <- paste0(mainDir, "/DATA_SC/NeoTIL/Raw/13LN/GEX/single-cell/", 
+                    i, "/outs/filtered_feature_bc_matrix")
+  print(dataDir)
+  print(list.files(dataDir))
+  Seurat::Read10X(data.dir = dataDir)
+}
+
+nameGEX <- c("ACTP_ATATIL", "ACTP_NeoTIL")
+nameAll <- c("ATATIL", "NeoTIL")
+listGEX <- lapply(nameGEX, get.sc.exp.mat)
+
+# IMPORTANT : Make sure name list matches the order of loaded data list!!!
+names(listGEX) <- nameGEX
+names(listGEX)
+str(listGEX[[1]])
+lapply(listGEX, dim)
+
+```
+
+
+# 2. Get all cells from VDJ data
+``` {r get TCR contig annotations from TCR-cellranger results for individual patients}
+
+nameTCR <- c("ATATIL.TCR", "NeoTIL.TCR")
+
+# Fetch all contigs (regardless of chain number)
+TCRcontig <- function(i, k) {
+  contig <- data.table::fread(paste0(mainDir, "/DATA_SC/NeoTIL/Raw/13LN/TCR/single-cell/" , i, "/outs/all_contig_annotations.csv")) %>% 
+    filter(is_cell == "TRUE" & full_length == "TRUE" & productive == "TRUE") %>% 
+    select(barcode, contig_id, chain, cdr3, v_gene, j_gene, raw_clonotype_id) %>% 
+    data.table::setnames("raw_clonotype_id", "Clonotype") %>%
+    unite(col = cdr3_clone, v_gene, cdr3, j_gene) #%>% 
+    #group_by(barcode) %>% filter(n() < 4)
+    
+  chA <- contig %>% filter(chain == "TRA") %>% arrange(barcode, contig_id) 
+  dA <- chA %>% group_by(barcode) %>% dplyr::summarise(chainA = paste0(cdr3_clone, collapse = ";"))
+  chB <- contig %>% filter(chain == "TRB") %>% arrange(barcode, contig_id) 
+  dB <- chB %>% group_by(barcode) %>% dplyr::summarise(chainB = paste0(cdr3_clone, collapse = ";"))
+  dAB <- full_join(dA, dB, by = "barcode")
+  #dAB$barcode <- str_replace(dAB$barcode, "-1", paste0("_", k))
+
+  # uniqContig <- contig %>% distinct(barcode, .keep_all = T) %>%
+  #   select(barcode, Clonotype) %>%
+  #   left_join(dAB, by = "barcode")
+ 
+  write.table(dAB, paste0(i, "_all.cells_with.TCR_20230717.txt"),
+               append = F, quote = F, row.names = F, sep = "\t")
+  
+  dAB <- dAB %>% mutate(AB = paste(chainA, chainB, sep = ","))
+  rm(chA, chB, dA, dB, contig); invisible(gc()); gc()
+  return(dAB)
+}
+
+listTCRcontig <- Map(TCRcontig, nameGEX, nameAll)
+names(listTCRcontig) <- nameTCR
+lapply(listTCRcontig, dim)
+
+```
+
+
+# 3. Subset TCR clones having common/selected TCRs
+```{r get common/selected clones}
+
+# 3a. common TCRs from both ATATIL & NeoTIL
+commonTCRs <- intersect(listTCRcontig$ATATIL.TCR$AB, listTCRcontig$NeoTIL.TCR$AB)
+
+getCommonTCRs <- function(i, k) {
+  common <- listTCRcontig[[i]] %>% filter(AB %in% commonTCRs) %>% select(-AB) %>% na.omit() %>% arrange(chainA, chainB) %>% mutate(Cohort = k)
+  return(common)
+}
+listTCRcommon <- Map(getCommonTCRs, c("ATATIL.TCR", "NeoTIL.TCR"), c("ATATIL", "NeoTIL"))
+names(listTCRcommon) <- nameTCR
+
+commonATANeo <- rbind(listTCRcommon$ATATIL.TCR, listTCRcommon$NeoTIL.TCR)
+write.table(commonATANeo, "13LN.ATATIL.NeoTIL_all.cells_with_common.TCRs_in.ACTP_20230717.txt", sep = "\t", quote = F, row.names = F, col.names = T)
+
+
+# 3b. selected TCRs from both ATATIL & NeoTIL
+selTCRs <- read.table("13LN_selected_TCRs_20230717.txt", sep = "\t", header = T) %>%
+  unite(col = "chainA", alpha_V, alpha_CDR3, alpha_J) %>%
+  unite(col = "chainB", beta_V, beta_CDR3, beta_J) %>%
+  mutate(AB = paste(chainA, chainB, sep = ","))
+selTCRs$cloneID <- factor(selTCRs$cloneID, levels = c(unique(selTCRs$cloneID)))
+
+getSelectedTCRs <- function(i, k) {
+  sel <- listTCRcontig[[i]] %>% 
+    filter(AB %in% selTCRs$AB) %>% 
+    left_join(selTCRs, by = "AB") %>%
+    select(barcode, chainA.x, chainB.x, cloneID) %>%
+    data.table::setnames(c("chainA.x", "chainB.x"), c("chainA", "chainB")) %>%
+    mutate(Cohort = k) %>%
+    arrange(cloneID)
+  return(sel)
+}
+listTCRsel <- Map(getSelectedTCRs, c("ATATIL.TCR", "NeoTIL.TCR"), c("ATATIL", "NeoTIL"))
+names(listTCRsel) <- nameTCR
+
+selATANeo <- rbind(listTCRsel$ATATIL.TCR, listTCRsel$NeoTIL.TCR)
+write.table(selATANeo, "13LN.ATATIL.NeoTIL_all.cells_with_selected.TCRs_in.ACTP_20230717.txt", sep = "\t", quote = F, row.names = F, col.names = T)
+
+```
+
+
+# 4. Combine GEX barcodes and TCRcontigs (including tested TCR info)
+```{r Get cell barcode lists for all GEX samples & combine all needed variables}
+
+# test with 1 sample
+# GEX <- listGEX[[1]]
+# TCR <- listTCRcommon[[1]] or listTCRsel[[1]]
+
+# spl is sample name from nameAll to be used as new df with 2 col "barcode"
+# GEX is expression matrix in listGEXall
+# TCR is df in listTCRcontig
+combine.GEX.TCR <- function(spl, GEX, TCR) {
+  spl <- data.frame(barcode = colnames(GEX)) %>% 
+    left_join(TCR, by = "barcode") %>%
+    mutate(chainA = ifelse(is.na(chainA), "undetected", chainA)) %>% 
+    mutate(chainB = ifelse(is.na(chainB), "undetected", chainB)) %>% 
+    dplyr::select(-Cohort) %>% 
+    column_to_rownames(var = "barcode")
+}
+
+listGEXTCRcomm <- Map(combine.GEX.TCR, nameAll, listGEX, listTCRcommon)
+head(listGEXTCRcomm[[1]])
+tail(listGEXTCRcomm[[1]])
+lapply(listGEXTCRcomm, dim)
+
+
+combine.GEX.TCR.sel <- function(spl, GEX, TCR) {
+  spl <- data.frame(barcode = colnames(GEX)) %>% 
+    left_join(TCR, by = "barcode") %>%
+    mutate(chainA = ifelse(is.na(chainA), "undetected", chainA)) %>% 
+    mutate(chainB = ifelse(is.na(chainB), "undetected", chainB)) %>% 
+    dplyr::select(-Cohort) %>%
+    column_to_rownames(var = "barcode")
+}
+listGEXTCRsel <- Map(combine.GEX.TCR, nameAll, listGEX, listTCRsel)
+head(listGEXTCRsel[[1]])
+tail(listGEXTCRsel[[1]])
+lapply(listGEXTCRsel, dim)
+
+```
+
+
+# 5. Create Seurat object with 2 samples
+```{r Create a Seurat object with the raw (non-normalized data) excluding CrCm4}
+
+create.seurat <- function(GEXdata, splName, GEXTCRdata, ...){
+  CreateSeuratObject(counts = GEXdata, 
+                     project = splName,
+                     min.cells = 5, #round(0.01*ncol(i)), 
+                     min.features = 200,
+                     meta.data = GEXTCRdata)
+}
+
+listSeu.comm <- mapply(create.seurat, listGEX, nameAll, listGEXTCRcomm)
+names(listSeu.comm) <- nameAll
+
+listSeu.sel <- mapply(create.seurat, listGEX, nameAll, listGEXTCRsel)
+names(listSeu.sel) <- nameAll
+
+# rename active.ident to sample name
+listSeu.comm <- mapply(SetIdent, listSeu.comm, value = nameAll)
+str(listSeu.comm)
+head(listSeu.comm[[1]]@meta.data)
+
+listSeu.sel <- mapply(SetIdent, listSeu.sel, value = nameAll)
+str(listSeu.sel)
+head(listSeu.sel[[1]]@meta.data)
+
+
+# merge all Seurat objects into 1
+seuComm <- merge(x = listSeu.comm[[1]],
+                 y = listSeu.comm[2],
+                 project = "13LN.ATATIL.NeoTIL_commonTCRs",
+                 add.cell.ids = nameAll,
+                 merge.data = FALSE #TRUE if all samples were normalized the same way, merge the data slot instead of just the counts
+                 )
+
+seuSel <- merge(x = listSeu.sel[[1]],
+                y = listSeu.sel[2],
+                project = "13LN.ATATIL.NeoTIL_selectedTCRs",
+                add.cell.ids = nameAll,
+                merge.data = FALSE #TRUE if all samples were normalized the same way, merge the data slot instead of just the counts
+                )
+
+# Subset seurat objects to cells with common/selected TCRs
+seuComm <- subset(seuComm, subset = chainA != "undetected" | chainB != "undetected")
+seuSel <- subset(seuSel, subset = chainA != "undetected" | chainB != "undetected")
+
+# Add percent.rb
+seuComm[["percent.ribo"]] <- PercentageFeatureSet(seuComm, pattern = "^RP[SL][[:digit:]]")
+seuSel[["percent.ribo"]] <- PercentageFeatureSet(seuSel, pattern = "^RP[SL][[:digit:]]")
+
+# Add percent.mt
+seuComm[["percent.mt"]] <- PercentageFeatureSet(seuComm, pattern = "^MT-")
+seuSel[["percent.mt"]] <- PercentageFeatureSet(seuSel, pattern = "^MT-")
+
+# Filter seurat objects
+seuComm <- subset(seuComm, 
+                  subset = nFeature_RNA <= 7000 & nFeature_RNA >= 200 &
+                           nCount_RNA <= 50000 & 
+                           percent.mt <= 20)
+
+seuSel <- subset(seuSel, 
+                 subset = nFeature_RNA <= 7000 & nFeature_RNA >= 200 &
+                          nCount_RNA <= 50000 & 
+                          percent.mt <= 20)
+
+# Add CC markers for seuComm (CellCycleScoring not working for seuSel!)
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+seuComm <- CellCycleScoring(seuComm,
+                            s.features = s.genes, 
+                            g2m.features = g2m.genes, 
+                            set.ident = F)
+seuComm$CCdiff <- seuComm$S.Score - seuComm$G2M.Score
+
+# # NOT RUN: 
+# seuSel <- CellCycleScoring(seuSel,
+#                            s.features = s.genes, 
+#                            g2m.features = g2m.genes, 
+#                            set.ident = F) # error in "cut_number() : Insufficient data values to produce 24 bins
+# seuSel$CCdiff <- seuSel$S.Score - seuSel$G2M.Score # not run
+
+# # Add percent.ribo, CC markerrs & set Identity
+# for (seu in c(seuComm, seuSel)) {
+#   seu[["percent.ribo"]] <- PercentageFeatureSet(seu, pattern = "^RP[SL][[:digit:]]")
+#   
+#   seu <- CellCycleScoring(seu,
+#                           s.features = s.genes, 
+#                           g2m.features = g2m.genes, 
+#                           set.ident = F)
+#   seu$CCdiff <- seu$S.Score - seu$G2M.Score
+#   
+#   seu <- SetIdent(seu, value = "orig.ident")
+# }
+
+
+# Factorize 
+seuComm$Phase <- factor(seuComm$Phase, levels = c("G1", "S", "G2M"))
+seuComm$orig.ident <- factor(seuComm$orig.ident, levels = c("ATATIL", "NeoTIL"))
+seuSel$cloneID <- factor(seuSel$cloneID, levels = c("TCR2_TR", "TCR4_TR", "TCR5_TR", "TCR6_TR", "TCR7_TR", "TCR9_TR", "TCR10_TR", "NeoTCR_TR"))
+seuSel$orig.ident <- factor(seuSel$orig.ident, levels = c("ATATIL", "NeoTIL"))
+
+seuComm$Cohort <- seuComm$orig.ident
+seuSel$Cohort <- seuSel$orig.ident
+
+rm(commonATANeo, selATANeo, listGEX, listGEXTCRcomm, listGEXTCRsel, listSeu.comm, listSeu.sel, listTCRcommon, listTCRcontig, listTCRsel, g2m.genes, s.genes, nameGEX, nameTCR); invisible(gc()); gc()
+
+```
+
+
+
+```{r Run Seurat pipeline with QC, eval=FALSE}
+
+# # Remove Ig & TRA/TRB genes from the clustering
+# counts <- GetAssayData(seuComm, assay = "RNA")
+# counts <- counts[-grep("^TRAV|^TRAC|^TRAJ|^TRBV|^TRBC|^TRBJ|^IGH|^IGL|^IGK",rownames(counts)),]
+# #counts <- counts[-grep("^IGH|^IGL|^IGK|^RP[SL][[:digit:]]",rownames(counts)),]
+# seuComm <- subset(seuComm, features = rownames(counts))
+# 
+# saveRDS(seuComm, "seuComm.9patients_from_indv.sample_not.norm_no.Ig.TR.genes_20230717.rds") ### USE THIS for all SUBSETS!!!
+
+# Seurat pipeline function
+seuratPipeline <- function(seu, scaleFeatures, seuName) {
+  # 1. Normalize
+  obj <- as.SingleCellExperiment(seu)
+
+  # Pre-cluster with 100 cells/cluster
+  # normalize pre-clustered data with scater
+  # transform sc object back to Seurat object
+  cl100 = scran::quickCluster(obj, min.size = 100) # can change this default min.size
+  obj = scran::computeSumFactors(obj, cluster = cl100)
+  obj= scater::logNormCounts(obj,
+                             log = T,
+                             transform = "log",
+                             pseudo_count = 1)
+  obj <- as.Seurat(obj, counts = "counts", data = "logcounts")
+  obj <- SetIdent(obj, value = "orig.ident")
+  
+  # 2. Regress & scale
+  obj <- ScaleData(obj, 
+                   features = rownames(obj),
+                   vars.to.regress = scaleFeatures)
+  
+  # 3. Find HVGs using default parameters
+  obj <- FindVariableFeatures(obj,
+                              selection.method = "vst",
+                              nfeatures = 2000,
+                              mean.function = ExpMean,
+                              dispersion.function = LogVMR,
+                              num.bin = 40,
+                              binning.method = "equal_width", # "equal_frequency"
+                              mean.cutoff = c(0.1, 8), #c(0.0125, 4),
+                              dispersion.cutoff = c(1, Inf)) #c(0, Inf)) # c(0, 0.4)
+
+  # 4. Dimensional reduction with PCA
+  obj <- RunPCA(obj,
+                features = VariableFeatures(obj),
+                npcs = 50,
+                ndims.print = 1:10,
+                nfeatures.print = 10,
+                reduction.key = 'PC_',
+                reduction.name = 'PCA')
+
+  # 5. Save normalized object
+  saveRDS(obj, paste0(seuName, "_norm.regress.hvg.pca_20230717.rds"))
+  
+  # 6. QC histogram
+  pdf(paste0(seuName, "_QC.histograms_20230717.pdf"), width = 16, height = 7)
+  par(mfrow = c(1,4))
+  hist(obj$nCount_RNA, freq = T, col = 'wheat',
+       main = paste(seuName, "count numbers"),
+       xlab = "count numbers")
+  hist(obj$nFeature_RNA, col = 'wheat', 
+       main = paste(seuName, "gene numbers"),
+       xlab = "gene numbers")
+  hist(obj$percent.mt, col = 'wheat', 
+       main = paste(seuName, "% MT genes"),
+       xlab = "percentage")
+  hist(obj$percent.ribo, col = 'wheat', 
+        main = paste(seuName, "% Rb genes"),
+        xlab = "percentage")
+  dev.off()
+
+  # Check gene expression before, after normalization, regression & scaling
+  pdf(paste0(seuName, "_QC.UMIcounts_before&after_normalization-regress.scaling_20230717.pdf"), width = 12, height = 7)
+  par(mfrow = c(1,3))
+  hist(colSums(obj@assays$RNA@counts),
+       breaks = 100,
+       col = 'wheat',
+       main = "before normalization",
+       xlab = "Sum of expression")
+  hist(colSums(obj@assays$RNA@data),
+       breaks = 100,
+       col = 'wheat',
+      main = "after normalization",
+      xlab = "Sum of expression")
+  hist(colSums(obj@assays$RNA@scale.data),
+       breaks = 100,
+       col = 'wheat',
+      main = "after norm-regress-scaling",
+      xlab = "Sum of expression")
+  dev.off()
+  
+  pdf(paste0(seuName, "_QC.featureScatter_20230717.pdf"), width = 16, height = 9)
+  p1 <- FeatureScatter(obj, pt.size = 0.1, feature1 = "nCount_RNA", feature2 = "percent.mt")
+  p2 <- FeatureScatter(obj, pt.size = 0.1, feature1 = "nCount_RNA", feature2 = "percent.ribo")
+  p3 <- FeatureScatter(obj, pt.size = 0.1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  print(p1 + p2 + p3)
+  dev.off()
+  
+  pdf(paste0(seuName, "_QC.violinPlots_20230717.pdf"), width = 12, height = 20)
+  print(VlnPlot(obj, 
+                features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"),
+                pt.size = 0,
+                ncol = 1)
+        )
+  dev.off()
+
+  # Visualize PCA
+  pdf(paste0(seuName, "_PCA_color.by_cohort_20230717.pdf"), width = 8, height = 6)
+  print(DimPlot(obj, 
+                dims = c(1, 2),
+                group.by = c("Cohort"),
+                reduction = "PCA")
+        )
+  dev.off()
+  
+  return(obj)
+  rm(p1, p2, p3); invisible(gc()); gc()
+
+}
+
+seuSel <- seuratPipeline(seuSel, c("nCount_RNA", "nFeature_RNA", "percent.mt", "percent.ribo"), "13LN.ATATIL.NeoTIL_selectedTCRs")
+seuComm <- seuratPipeline(seuComm, c("nCount_RNA", "nFeature_RNA", "CCdiff", "percent.mt", "percent.ribo"), "13LN.ATATIL.NeoTIL_commonTCRs")
+
+```
+
+
+
+```{r run Harmony on to correct PCA, eval=FALSE}
+# "Cohort" is the variable with the highest batch effect
+
+#obj <- readRDS("seuComm_norm.regress.hvg.pca_20230717.rds")
+harmonyPipeline <- function(seu, seuName) {
+  intgHar <- RunHarmony(
+    object = seu,
+    group.by.vars = c("Cohort"), # cCrariates to be remCred, affected by theta & lambda below
+    reduction = "PCA",
+    dims.use = 1:50, # default all PCs
+    theta = 2, # default; larger for more diverse clusters, 0 for no diversity
+    lambda = 1, # default; smaller results in more aggressive correction
+    sigma = 0.1, # default; larger results in cells assigned to more cluster
+    #nclust = NULL, # 1 = simple linear regression
+    #tau = 0, # expected number of cells per cluster, protection against Crerclustering small datasets with larger ones
+    block.size = 0.01, # default; larger -> faster but less accurate
+    max.iter.harmony = 10,
+    max.iter.cluster = 20,
+    epsilon.cluster = -Inf, # set to -Inf to never stop convergence early
+    epsilon.harmony = -Inf, # set to -Inf to never stop convergence early
+    plot_convergence = TRUE,
+    verbose = TRUE,
+    reference_values = NULL,
+    reduction.save = "Harmony",
+    assay.use = "RNA",
+    project.dim = T
+  )
+
+  intgHar$ident <- NULL
+  saveRDS(intgHar, paste0("intgHar_of_", seuName, "_20230717.rds"))
+
+  # Visualize Harmony-corrected PCA
+  pdf(paste0("intgHar_", seuName, "_Harmonys_color.by_cohort_20230717.pdf"), width = 8, height = 6)
+  print(DimPlot(intgHar, 
+                dims = c(1, 2),
+                group.by = c("Cohort"), # current active.ident
+                reduction = "Harmony")
+       )
+  dev.off()
+
+  pdf(paste0("intgHar_", seuName, "_Harmonys_split.by_cohort_20230717.pdf"), width = 16, height = 6)
+  print(DimPlot(intgHar, 
+                dims = c(1, 2),
+                split.by = "Cohort",
+                reduction = "Harmony")
+        )
+  dev.off()
+
+  # VizDimLoading plot
+  pdf(paste0("intgHar_", seuName, "_topGenes_associated_with_50Harmonys_20230717.pdf"), width = 22, height = 50)
+  print(VizDimLoadings(intgHar, dims = 1:50, reduction = "Harmony", ncol = 5) + # patchwork object
+          plot_annotation(title = paste(seuName, "top genes associated with 50 Harmonys"))
+        )
+  dev.off()
+
+  # Heatmap of top 20 HVGs associated with the first 50 Harmonys/PCs
+  pdf(paste0("intgHar_", seuName,"_heatmap_of_top20.HVGs_50Harmonys_20230717.pdf"), width = 14, height = 30)
+  print(DimHeatmap(intgHar, dims = 1:50, cells = 500, nfeatures = 20, ncol = 5,
+                   reduction = 'Harmony', assays = 'RNA', slot = 'scale.data',
+                   balanced = TRUE, combine = TRUE, fast = FALSE) +
+          plot_annotation(paste(seuName, "- heatmap of top 20 HVGs in 50 Harmonys"))
+        )
+  dev.off()
+
+  # Find the best numbers of harmony/ PCs
+  pdf(paste0("intgHar_", seuName, "_ElbowPlot_20230717.pdf"))
+  print(ElbowPlot(intgHar, ndims = 50, reduction = "Harmony"))
+  dev.off()
+
+  return(intgHar)
+}
+
+harSel <- harmonyPipeline(seuSel, "13LN.ATATIL.NeoTIL_selectedTCRs")
+harComm <- harmonyPipeline(seuComm, "13LN.ATATIL.NeoTIL_commonTCRs")
+
+```
+
+
+
+```{r find optimal k and res for umap with 25pcs, eval=FALSE}
+#intgHar <- readRDS("intgHar_from_Cr_20230717.rds")
+
+# 30 PCs identified from Elbow plot, VizDimLoading & heatmap for Harmony and 50 PCs for non-integrated data
+findOptimal <- function(intgHar, pc, seuName) {
+  for (k in c(20, 25, 30)) {
+    intgH <- FindNeighbors(intgHar, 
+                           reduction = "Harmony", # VERY IMPORTANT: "Harmony" !!!!
+                           dims = 1:pc, # as found by Elbow plot, heatmap & VizLoading
+                           k.param = k, # default 20, can also test 30
+                           annoy.metric = "euclidean" # default "euclidean"; can also test "cosine"
+                           )
+    intgH <- FindClusters(intgH, 
+                          #algorithm = 4, # 4 is Leiden, default 1 is classical Louvain
+                          resolution = seq(0.1, 1, 0.1))
+    # Use clustree to look at clusterings at different resolution
+    pdf(paste0("intgHar_", seuName, "_clustree.", pc, "pc.k", k, "_20230717.pdf"), width = 9, height = 16)
+    print(clustree(intgH, prefix = "RNA_snn_res."))
+    dev.off()
+    rm(intgH); invisible(gc()); gc()
+  }
+}
+
+findOptimal(harSel, 11, "13LN.ATATIL.NeoTIL_selectedTCRs")
+findOptimal(harComm, 17, "13LN.ATATIL.NeoTIL_commonTCRs")
+
+```
+
+
+
+```{r Re-find neighbors & clusters with selected pc, k & optimal resolution, then umap, include=FALSE}
+
+# From above results, select 30pc and k30 with 0.5res
+neighborClusterUMAP <- function(intgHar, seuName, pc, k, res) {
+  intgH <- FindNeighbors(intgHar, 
+                         reduction = "Harmony", # VERY IMPORTANT: "Harmony" !!!!
+                         dims = 1:pc, # as found by Elbow plot
+                         k.param = k, # default 20, can also test 30
+                         annoy.metric = "euclidean" # default "euclidean"; can also test "cosine"
+                         )
+  intgH <- FindClusters(intgH, resolution = res)
+
+  ## Tabulate cells by cluster ID, replicate, or both
+  cellNumber <- c(table(Idents(intgH)))
+  cell_proportion <- c(prop.table(table(Idents(intgH))))
+  clustInfo <- data.frame(cellNumber, cell_proportion)
+  clustInfo <- rownames_to_column(clustInfo, var = "clusterID")
+  write.table(clustInfo, paste0("intgHar_", seuName, "_", pc, "pc.k", k, "_", res, "res_table_20230717.txt"),
+              append = F, quote = F, row.names = F, col.names = T, sep = "\t")
+
+  intgH <- RunUMAP(intgH,
+                   reduction = "Harmony",  
+                   dims = 1:pc,
+                   n.neighbors = k, #default 30, range 5-50, large n for preserved global structure while loss of detailed local structure, use same k as in FindNeighbors for consistent results!!! 
+                   min.dist = 0.2, #default 0.3, range 0.001-0.5, large dist for evenly distributed embedded points, small for optimizing accuracy of local structure
+                   spread = 1, 
+                   metric = "cosine", #default "cosine" to separate clusters better than "euclidean"
+                   seed.use = 1)
+  
+  return(intgH)
+  }
+
+harSel <- neighborClusterUMAP(harSel, "13LN.ATATIL.NeoTIL_selectedTCRs", 11, 25, 0.6)
+harComm <- neighborClusterUMAP(harComm, "13LN.ATATIL.NeoTIL_commonTCRs", 17, 25, 0.6)
+
+```
+
+
+```{r add cloneID to harComm}
+
+selAB <- selTCRs %>% dplyr::select(cloneID, AB)
+
+meta <- FetchData(harComm, vars = c("chainA", "chainB")) %>% 
+  mutate(AB = paste(chainA, chainB, sep = ",")) %>% 
+  rownames_to_column(var = "barcode") %>% 
+  left_join(selAB) %>% 
+  column_to_rownames(var = "barcode") %>%
+  dplyr::select(cloneID)
+
+meta$cloneID <- as.character(meta$cloneID) %>% replace_na("others")
+meta$cloneID <- factor(meta$cloneID, levels = c("TCR2_TR", "TCR4_TR", "TCR5_TR", "TCR6_TR", "TCR7_TR", "TCR9_TR", "TCR10_TR", "NeoTCR_TR", "others"))
+
+harComm <- AddMetaData(harComm, meta = meta)
+saveRDS(harComm, "intgHar_of_13LN.ATATIL.NeoTIL_commonTCRs_20230717.rds")
+saveRDS(harSel, "intgHar_of_13LN.ATATIL.NeoTIL_selectedTCRs_20230717.rds")
+
+```
+
+
+
+#20230717 STARTS HERE!!!
+```{r load Har objects}
+
+harComm <- readRDS("../20230717/intgHar_of_13LN.ATATIL.NeoTIL_commonTCRs_20230717.rds")
+#harSel <- readRDS("../20230717/intgHar_of_13LN.ATATIL.NeoTIL_selectedTCRs_20230717.rds")
+
+# Add TCR_5 cloneID to cells with additional alpha chain "TRAV26-2_CIPFVYNNNDMRF_TRAJ43" sent by Talita and Marion on 20230713
+metaComm <- FetchData(harComm, vars = c("chainA", "cloneID")) %>% 
+  mutate(cloneID = ifelse(chainA %in% c("TRAV26-2_CIPFVYNNNDMRF_TRAJ43;TRAV30_CGTAPRGSARQLTF_TRAJ22", 
+                                        "TRAV30_CGTAPRGSARQLTF_TRAJ22;TRAV26-2_CIPFVYNNNDMRF_TRAJ43"),
+                          "TCR5_TR", as.character(cloneID)))
+harComm <- AddMetaData(harComm, metaComm)
+harComm$cloneID <- factor(harComm$cloneID, levels = c("TCR2_TR", "TCR4_TR", "TCR5_TR", "TCR6_TR", "TCR7_TR", "TCR9_TR", "TCR10_TR", "NeoTCR_TR", "others"))
+
+
+# Subset harSel
+harSel <- subset(harComm, subset = cloneID != "others")
+
+# Save har objects
+saveRDS(harComm, "intgHar_of_13LN.ATATIL.NeoTIL_all.commonTCRs_20230717.rds")
+saveRDS(harSel, "intgHar_of_13LN.ATATIL.NeoTIL_selected.commonTCRs_20230717.rds")
+
+```
+
+
+### ------------------------------------------------------------------------
+### ------------------------------------------------------------------------
+# UMAP with various variables
+```{r Visualize harmony-embedded merged data on umap, include=TRUE, fig.width=16, fig.height=7}
+
+clone_colors_Comm <- c("grey90", "red1", "green", "yellow2", "pink", "#B755DC", "orange", "blue", "turquoise")
+clone_colors_Sel <- c("red1", "green", "yellow2", "pink", "#B755DC", "orange", "blue", "turquoise")
+
+plotUMAP <- function(intgHar, seuName, cloneColors) {
+  cluster_colors <- distinctColorPalette(length(unique(intgHar$seurat_clusters)))
+  #clone_colors <- distinctColorPalette(length(unique(intgHar$cloneID)))
+
+  p1 <- DimPlot(intgHar, reduction = "umap", group.by = "seurat_clusters",
+                label = T, repel = T, label.size = 5.5,
+                cols = cluster_colors) #default active.ident = "seurat_clusters"
+  p2 <- DimPlot(intgHar, reduction = "umap", label = F,
+                group.by = "Cohort")
+  p3 <- DimPlot(intgHar, reduction = "umap", label = F,
+                group.by = "cloneID",
+                cols = cloneColors,
+                order = levels(intgHar$cloneID))
+  p1 + p2 + p3
+
+  pdf(paste0("intgHar_", seuName, "_various.UMAPs_20230717.pdf"), width = 18, height = 4.5)
+  print(p1+p2+p3)
+  dev.off()
+}
+
+plotUMAP(harSel, "13LN.ATATIL.NeoTIL_selected.commonTCRs", clone_colors_Sel)
+plotUMAP(harComm, "13LN.ATATIL.NeoTIL_all.commonTCRs", clone_colors_Comm)
+
+```
+
+
+# Expression of canonical cell-type markers on umap :
+```{r feature plot canonical markers, include=TRUE,  fig.width=9, fig.height=10}
+
+plotFeatures <- function(intgHar, seuName) {
+  DefaultAssay(intgHar) <- "RNA"
+  #Idents(intgHar) <- "seurat_clusters"
+
+  cellType <- c("CD3E", "CD8A", "CD4", "KIR2DL4", "CD79A", "C1QA")
+  
+  pdf(paste0("intgHar_", seuName, "_featurePlots_of_canonical.lineage.markers_20230717.pdf"), width = 9, height = 10)
+  print(FeaturePlot(intgHar,
+                    features = cellType,
+                    reduction = "umap", slot = "data",
+                    cols = rev(brewer.pal(11, "Spectral")),
+                    label = TRUE, repel = TRUE, label.size = 3.5, label.color = "magenta",
+                    order = TRUE, by.col = TRUE, combine = T, ncol = 2
+                    ) +
+            plot_annotation(title = paste(seuName, "cell lineage markers"),
+                            theme = theme(plot.title = element_text(size = 24))
+                            )
+        )
+  dev.off()
+}
+
+plotFeatures(harSel, "13LN.ATATIL.NeoTIL_selected.commonTCRs")
+plotFeatures(harComm, "13LN.ATATIL.NeoTIL_all.commonTCRs")
+
+```
+
+
+## Get cell counts per cloneID per Cohort
+```{r prepare to plot cell counts per cloneID per Cohort}
+
+getCellCount <- function(seu) {
+  df <- FetchData(seu, vars = c("Cohort", "cloneID"))
+  
+  # cell count per patient
+  cellCount <- df %>%
+    group_by(Cohort, cloneID, .drop = T) %>%
+    summarise(cellCount = n())
+  return(cellCount)
+}
+
+countComm <- getCellCount(harComm)
+countSel <- getCellCount(harSel)
+
+```
+
+
+
+```{r get cells for common TCRs}
+
+# countSel <- read.table("13LN.ATATIL.NeoTIL_all.cells_with_selected.commonTCRs_in.ACTP_20230717.txt", sep = "\t", header = T) %>%
+#   dplyr::select(barcode, cloneID)
+# 
+# countComm <- read.table("13LN.ATATIL.NeoTIL_all.cells_with_all.commonTCRs_in.ACTP_20230717.txt", sep = "\t", header = T) %>%
+#   left_join(countSel, by = "barcode")
+# countComm$cloneID <- replace_na(countComm$cloneID, "others")
+# 
+# countComm <- countComm %>% mutate(cloneID = factor(cloneID, levels = c("TCR2_TR", "TCR4_TR", "TCR5_TR", "TCR6_TR", "TCR7_TR", "TCR9_TR", "TCR10_TR", "NeoTCR_TR", "others"))) %>%
+#   arrange(cloneID)
+# 
+# write.table(countComm, "13LN.ATATIL.NeoTIL_all.cells_with_common.TCRs_in.ACTP_20230717.txt", sep = "\t", quote = F, row.names = F, col.names = T)
+
+```
+
+
+# Plot cell counts per cloneID per Cohort
+```{r plot cell/clone counts per patient for reactivity, fig.width=12, fig.height=5}
+
+#cellCountPlot <- function(df, count, aspectRatio) {
+  p <- ggplot(countComm, aes(x = cloneID, y = log2(cellCount), fill = cloneID, pattern = Cohort)) +
+    
+    geom_bar_pattern(stat = "identity",
+                     position = position_dodge(width = 0.9), # use "dodge" for side-by-side bars, "stack" for stacked bars
+                     color = "grey",
+                     pattern_fill = "grey",
+                     pattern_density = 0.01, #size
+                     pattern_spacing = 0.03) +
+    
+      scale_fill_manual(values = c(rev(clone_colors_Sel), "grey90")) +
+      scale_pattern_manual(values = c(ATATIL = "none", NeoTIL = "circle")) +
+  
+      #facet_grid(~ Cohort, switch = "x") +
+      scale_x_discrete(expand = c(0,0, 0,0)) +
+      scale_y_continuous(expand = c(0.03,0, 0.05,0)) +
+      ggtitle("Cell counts per common selected clone in ACTP of 13LN") +
+      #ylab() +
+      xlab("") +
+      theme_classic() +
+      theme(aspect.ratio = 1/2, # axis size y/x 
+            axis.text.x = element_text(angle = -30, hjust = 0.2, vjust = 0.2),
+            axis.ticks.x = element_blank(),
+            legend.title = element_blank()
+      ) +
+      geom_text(aes(label = cellCount), size = 3.5, type = "bold",
+                position = position_dodge(width = 0.9),
+                vjust = -0.3
+                ) +
+  
+      guides(pattern = guide_legend(override.aes = list(fill = "white")), # override default legend style
+             fill = guide_legend(override.aes = list(pattern = "none"))
+            )
+  p
+  
+  pdf("Cell.counts_per_selected.commonTCRs_in.ACTP_of_13LN.ATATIL.NeoTIL_20230717.pdf", width = 12, height = 5)
+  print(p)
+  dev.off()
+#}
+
+```
+
+
+# DE for Cohort
+```{r DE}
+
+# function for DE, table and volcano
+DE <- function(seu, DEclass, id1, id2, pct, test, TCRcategory) {
+  Idents(seu) <- seu[[DEclass]] # switch identity to class used for DE
+  Idents(seu) <- as.character(Idents(seu)) # VERY IMPORTANT!!!
+  #subseu <- subset(seu, subset = CellType == subs)
+  # do DE
+  Marker <- FindMarkers(seu,
+                        ident.1 = id1, ident.2 = id2,
+                        only.pos = F,
+                        min.pct = pct,
+                        logfc.threshold = 0,   # 0.58496 = 1.5x; default 0.25
+                        min.cells.feature = 3,
+                        min.cells.group = 3,
+                        pseudocount.use = 0.1, # default 1
+                        #return.thresh = 0.01, only works with FindAllMarkers
+                        assay = 'RNA',
+                        slot = 'data',
+                        #latent.vars = "SampleID", #uncomment this if use test LR!!!!!!
+                        test.use = test
+  )
+  
+  Marker <- Marker %>%
+    rownames_to_column(var = "gene") %>%
+    data.table::setnames(c("avg_log2FC", "p_val_adj"), c("log2FC", "padj"))
+  
+  # save significant DE list
+  write.table(Marker,
+              paste0("13LN.ACTP_", id1, "_vs_", id2, "_", TCRcategory, "_", test, ".test_all.DEgenes_", pct, "cells_20230717.txt"),
+              append = F, quote = F, sep = "\t", row.names = F, col.names = T)
+  
+  sigMarker <- Marker %>% filter(padj <= 0.01) %>% arrange(desc(log2FC))
+  write.table(sigMarker,
+              paste0("13LN.ACTP_", id1, "_vs_", id2, "_", TCRcategory, "_", test, ".test_fdr1.DEgenes_", pct, "cells_20230717.txt"),
+              append = F, quote = F, sep = "\t", row.names = F, col.names = T)
+
+  return(Marker)
+}
+
+DE.Comm <- DE(harComm, "Cohort", "NeoTIL", "ATATIL", 0.1, "LR", "all.commonTCRs")
+DE.Sel <- DE(harSel, "Cohort", "NeoTIL", "ATATIL", 0.1, "LR", "selected.commonTCRs")
+
+```
+
+
+
+```{r JC.Oliveira gene lists, include=FALSE, eval=FALSE}
+
+lineage = c("CD8A", "CD8B", "KLRD1", "KIR2DL4", "NCAM1", "TRGV5", "CD3E")
+naive.memory = c("SELL", "CCR7", "IL7R", "CD28", "FAS", "CD27", "ITGAE", "ITGAL", "ITGAM", "ITGAX", "LTB")
+exhaustion.inhibition = c("PDCD1", "TIGIT", "HAVCR2", "LAG3", "CTLA4", "CD244", "KLRG1", "TNFRSF14", "BTLA", "CD160")
+activation = c("CD38", "CD28", "ENTPD1", "CD69", "IL2RA", "ICOS", "TNFRSF4", "TNFRSF9", "HLA-DRA", "CD40LG")
+effector.cytokine = c("GZMA", "GZMB", "GZMH", "GZMK", "GZMM", "PRF1", "NKG7", "GNLY", "IFNG", "IL2", "FASLG", "TNF") #"IL17A", 
+effector.molecule = c("CCL3", "CCL4", "CCL5", "CST7")
+transcription.factor = c("LEF1", "TCF7", "EOMES", "NR4A1", "TBX21", "PRDM1", "TOX", "GATA3", "ID2", "ID3", "ZNF683", "FOXP3", "MKI67", "TOP2A", "FOS", "JUN")
+NK.gamma.delta = c("TRGV9", "TRDV2", "KLRB1", "KLRC3")
+chemokine.receptor = c("CCR4", "CCR5", "CXCR3", "CXCR4")
+co.stimulation = c("CD80", "CD86", "CD83")
+to.be.classified = c("CD74", "CD52", "ANXA1", "VCAM1", "CD200", "ISG15", "ITGA4", "IL12RB1", "IL12RB2")
+
+```
+
+
+```{r combine AH & JC.Oliveira markers from DE gene list}
+
+AH <- c("B3GAT1", "ITGAE", "GZMK", "FOXP3", "CTLA4", "KLRG1", "TCF7", "TNFSF9", "JUN", "CD27", "CD40", "MKI67", "BTLA")
+
+getSelList <- function(DElist, seuName) {
+  Marker <- DElist
+
+  hla.dr <- Marker[str_detect(Marker$gene, "HLA-DR"), ]
+  hla.dr <- hla.dr$gene
+
+  AHlist <- c(AH, hla.dr)
+  AHgene <- intersect(AHlist, Marker$gene)
+
+  Mcat = list(lineage, naive.memory, exhaustion.inhibition, activation, effector.cytokine, effector.molecule, transcription.factor, NK.gamma.delta, chemokine.receptor, co.stimulation, to.be.classified, AHgene)
+Mname = list("lineage", "naive.memory", "exhaustion.inhibition", "activation", "effector.cytokine", "effector.molecule", "transcription.factor", "NK.gamma.delta", "chemokine.receptor", "co.stimulation", "to.be.classified", "AH.selection")
+
+  selList <- unlist(Mcat, recursive = FALSE) # to label on volcano plot below !!!
+  saveRDS(selList, paste0("Selected.markers_of_", seuName, "_for_plotting_NeoTIL.vs.ATATIL_of_13LN.ACTP_20230717.RData"))
+  
+  return(selList)
+}
+
+selList.Comm <- getSelList(DE.Comm, "13LN.ATATIL.NeoTIL_all.commonTCRs")
+selList.Sel <- getSelList(DE.Sel, "13LN.ATATIL.NeoTIL_selected.commonTCRs")
+
+```
+
+
+
+```{r volcano plot function}
+# 
+# DE.Comm <- read.table("13LN.ACTP_NeoTIL_vs_ATATIL_all.commonTCRs_LR.test_all.DEgenes_0.1cells_20230717.txt", sep = "\t", header = T)
+# DE.Sel <- read.table("13LN.ACTP_NeoTIL_vs_ATATIL_selectedTCRs_LR.test_all.DEgenes_0.1cells_20230717.txt", sep = "\t", header = T)
+# 
+# selList.Comm <- readRDS("Selected.markers_of_13LN.ATATIL.NeoTIL_all.commonTCRs_for_plotting_NeoTIL.vs.ATATIL_of_13LN.ACTP_20230717.RData")
+# selList.Sel <- readRDS("Selected.markers_of_13LN.ATATIL.NeoTIL_selected.commonTCRs_for_plotting_NeoTIL.vs.ATATIL_of_13LN.ACTP_20230717.RData")
+
+volcano <- function(Marker, id1, id2, TCRcategory, test, labCategory, hiliLabels, keyvals) {
+
+  # Create variable point size depending on padj
+  Marker <- Marker %>%  mutate(revPval = -log10(padj)) %>% arrange(desc(revPval))
+  noInf <- Marker %>% filter(revPval != Inf) # this is to get the non-Inf max value
+  Marker <- Marker %>% mutate(adjRevPval = ifelse(revPval == Inf, max(noInf$revPval)+1, revPval)) %>% 
+    mutate(ptSize = 5*adjRevPval/max(adjRevPval))
+
+  p <- print(EnhancedVolcano(Marker,
+                             lab = Marker$gene,
+                             x = "log2FC",
+                             y = "padj",
+                              title = paste0("\n", "13LN.ACTP : ", id1, "_vs_", id2, 
+                                            "\n ", TCRcategory, "_", test,".test_", labCategory, " at fdr0.01"),
+                             subtitle = "",
+                             xlab = "log2 fold change",
+                             ylab = "-log10(adjusted p-value)",
+                             xlim = c(min(Marker$log2FC)*1.1, max(Marker$log2FC)*1.1),
+                             #ylim = c(0, max(-log10(Marker$p_val_adj)*1.1)),
+                             pCutoff = 0.01,
+                             FCcutoff = 1,
+                             cutoffLineType = "dashed",
+                             pointSize = Marker$ptSize,
+                             axisLabSize = 17,
+                             labSize = 4,
+                             labFace = "bold",
+                             boxedLabels = TRUE,
+                             #parseLabels = FALSE,
+                             colCustom = keyvals,
+                             selectLab = hiliLabels,
+                             colAlpha = 0.6,
+                             legendPosition = "top",
+                             legendLabSize = 16,
+                             drawConnectors = TRUE,
+                             widthConnectors = 0.1,
+                             arrowheads = FALSE,
+                             max.overlaps = 45, # or Inf
+                             maxoverlapsConnectors = 45, # or Inf
+                             gridlines.major = FALSE,
+                             gridlines.minor = FALSE,
+                             border = "full") + 
+               ggplot2::scale_x_continuous(breaks = seq(round(min(Marker$log2FC)), round(max(Marker$log2FC)), 0.5))
+  )
+  
+  p1 <- p + 
+    ggplot2::scale_x_continuous(breaks = seq(-5.5, 5.5, 0.5)) +
+    theme(axis.title = element_text(size = 18, face = "bold"))
+  
+  pdf(paste0("13LN.ACTP_", id1, "_vs_", id2, "_", TCRcategory, "_", test, ".test_", labCategory, "_volcanoPlot_10pct.cells_20230717.pdf"),
+      width = 16, height = 16)
+  print(p1)
+  dev.off()
+  
+}  
+
+```
+
+
+```{r plot volcano for DE genes}
+
+# Set colors for significance levels  
+getLabels <- function(Marker) {
+  keyvals <- ifelse(
+    Marker$padj < 0.01 & Marker$log2FC >= 1, "red3",
+    ifelse(Marker$padj < 0.01 & Marker$log2FC <= -1, "royalblue",
+           ifelse(Marker$padj < 0.01 & (Marker$log2FC < 1 & Marker$log2FC > 0), "goldenrod",
+                  ifelse(Marker$padj < 0.01 & (Marker$log2FC < 0 & Marker$log2FC > -1), "forestgreen",
+                         "grey30"))))
+
+  names(keyvals)[keyvals == "red3"] <- "UP at log2FC>=1"
+  names(keyvals)[keyvals == "goldenrod"] <- "UP at 0<log2FC<1"
+  names(keyvals)[keyvals == "forestgreen"] <- "DOWN at -1<log2FC<0"
+  names(keyvals)[keyvals == "royalblue"] <- "DOWN at log2FC<=-1"
+  names(keyvals)[keyvals == "grey30"] <- "NS"
+  
+  return(keyvals)
+}
+
+keyvals.Comm <- getLabels(DE.Comm)
+keyvals.Sel <- getLabels(DE.Sel)
+
+# 1. common TCRs
+DE.labels.Comm = DE.Comm$gene[which(names(keyvals.Comm) %in% c("UP at log2FC>=1", "DOWN at log2FC<=-1"))]
+selected.labels.Comm = intersect(selList.Comm, DE.Comm$gene)
+
+#volcano <- function(Marker, id1, id2, TCRcategory, test, labCategory, hiliLabels, keyvals) 
+volcano(DE.Comm, "NeoTIL", "ATATIL", "all.commonTCRs", "LR", "DE.genes", DE.labels.Comm, keyvals.Comm)
+volcano(DE.Comm, "NeoTIL", "ATATIL", "all.commonTCRs", "LR", "selected.markers", selected.labels.Comm, keyvals.Comm)
+
+# 2. selected TCRs
+DE.labels.Sel = DE.Sel$gene[which(names(keyvals.Sel) %in% c("UP at log2FC>=1", "DOWN at log2FC<=-1"))]
+selected.labels.Sel = intersect(selList.Sel, DE.Sel$gene)
+
+volcano(DE.Sel, "NeoTIL", "ATATIL", "selected.commonTCRs", "LR", "DE.genes", DE.labels.Sel, keyvals.Sel)
+volcano(DE.Sel, "NeoTIL", "ATATIL", "selected.commonTCRs", "LR", "selected.markers", selected.labels.Sel, keyvals.Sel)
+
+```
+
+# 20230717 STOPS HERE!!!
+
+
+
+
+
+
+# NOT RUN!!!
+```{r stacked violin plots, include=FALSE}
+
+#sample_colors = distinctColorPalette(length(unique(CD8$SampleID)))
+
+sigGene <- DElist %>% filter(padj <= 0.05) %>% arrange(desc(log2FC))
+
+violinPlot <- function(markerClass, markerList, colorClass, w){
+  pdf(paste0("seuComm.8patients_correctedCD8_first.test_tumor.reactivity_stacked.violin.plots_per.", colorClass, "_for_", markerClass, "-markers_20230717.pdf"),
+      width = w, height = length(markerList)/2)
+  print(VlnPlot(CD8, features = markerList, group.by = colorClass, #split.by = "firstTest_reactivity", 
+                assay = "RNA", slot = "data", adjust = 0.6,
+                #cols = sample_colors,
+                pt.size = 0, combine = T, sort = FALSE, flip = TRUE, stack = TRUE
+  ) + 
+    plot_annotation(paste0(markerClass, " markers"),
+                    theme = theme(plot.title = element_text(size = 12, face = "bold"))))
+  dev.off()
+}
+
+violinPlot("DE", sigGene$gene, "Patient", 12)
+violinPlot("DE", sigGene$gene, "firstTest_reactivity", 10)
+
+```
+
+
+
+
+# ----------------------------------------------------------------------------------------------------------
+```{r load data}
+## Load intgHar & intgHarTNK2 seurat object
+intgHar <- readRDS("../20220329_Harmony_TNKsubset/intgHar_elbow_20pc.k25_0.8Cluster-Umap_20220330.rds")
+intgHarTNK2 <- readRDS("../20220505_TNK2/intgHarTNK2_25pc.k20_1.6Cluster_0.2dist_umap_20220505.rds")
+Idents(intgHarTNK2) <- factor(Idents(intgHarTNK2), 
+                              levels = c("4", "1", "21", "13", "2", "0", "12", "11", "14", 
+                                         "18", "16", "5", "15", "20", "19", "8",
+                                         "17", "22", "6", "3", "7", "10", "9"))
+
+## Load subset of assigned CD8cells from 20220513
+rCD8 <- readRDS("intgHarTNK2_renormalized_CD8.SubsetReactivity_20220513.rds")
+
+## Fetch normalized expression matrix
+TNK2norm <- GetAssayData(intgHarTNK2, slot = "data")
+CD8norm <- GetAssayData(rCD8, slot = "data")
+
+## Load tumor reactivity marker lists of CD8cells subset from 20220513
+MCD8 <- read.table("intgHarTNK2_25pc.k20_1.6cluster_renorm.CD8cell.tumorRectivity.markers_LR_lfc0.25_fdr5_20220513.txt", header = T, sep = "\t")
+
+## function of stacked violinPlot for UCell scores
+stackedViolin.UCell <- function(s,f,n,l) {
+  VlnPlot(s, features = f,
+          stack = T, flip = T) +
+  xlab(l) + ylab("UCell score") +
+  ggtitle(paste("UCell scores for", n, "signature per", l)) +
+  scale_x_discrete(expand = c(0,0, 0,0)) +
+  theme(title = element_text(size = 18, face = "bold"),
+        axis.text.y = element_text(size = 14))
+}
+
+## function of stacked violinPlot for AUCell scores
+stackedViolin.AUCell <- function(s,f,n,l) {
+  VlnPlot(s, features = f,
+          stack = T, flip = T) +
+  xlab(l) + ylab("AUCell score") +
+  ggtitle(paste("AUCell scores for", n, "signature per", l)) +
+  scale_x_discrete(expand = c(0,0, 0,0)) +
+  theme(title = element_text(size = 18, face = "bold"),
+        axis.text.y = element_text(size = 14))
+}
+```
+
+
+## T/NK lineage scores for TNK2 subset 
+```{r scores for T/NK lineages, include=TRUE, fig.width=12, fig.height=6}
+## T cell lineage markers
+TNKmarkers <- list()
+TNKmarkers$CD4T <- c("CD4", "CD8A-", "CD8B-")
+TNKmarkers$CD8T <- c("CD8A", "CD8B", "CD4-")
+TNKmarkers$CD4CD8T <- c("CD4", "CD8A", "CD8B")
+TNKmarkers$NK <- c("KLRF1", "KLRD1", "CD3E-", "CD3G-")
+TNKmarkers$MAIT <- c("KLRB1", "SLC4A10")
+TNKmarkers$gdT <- c("TRDC", "TRDV1", "TRDV2", "TRGV1", "TRGV9")
+
+## Calculate UCell score for each lineage marker signature of TNK2 subset
+intgHarTNK2 <- AddModuleScore_UCell(intgHarTNK2, features = TNKmarkers, ncores = 8)
+
+## Calculate AUCell score for each lineage marker signature of TNK2 subset
+TNK2_AUClineage <- AUCell_run(TNK2norm, TNKmarkers, BPPARAM = BiocParallel::MulticoreParam(8))
+save(TNK2_AUClineage, file="TNK2_AUClineage.RData")
+
+## Violin plots of scores
+TNKmarkers.names <- paste0(names(TNKmarkers), "_UCell")
+stackedViolin.UCell(intgHarTNK2, TNKmarkers.names, "T/NK lineage", "cluster of TNK2 subset")
+#stackedViolin.AUCell(TNK2_AUClineage, TNKmarkers.names, "T/NK lineage", "cluster of TNK2 subset")
+```
+
+
+# ----------------------------------------------------------------------------------------------------------
+## T/NK lineage scores for subset (3a.3) of CD8 cells with known reactivity from 20220516
+```{r scores of T/NK lineage for subset CD8.reactivity, include=TRUE, fig.width=10, fig.height=6}
+Idents(rCD8) <- "seurat_clusters"
+Idents(rCD8) <- factor(Idents(rCD8), 
+                              levels = c("13", "2", "0", "12", "11", "14", 
+                                         "18", "16", "5", "15", "20", "19", "8",
+                                         "17", "22", "6", "3", "7", "10", "9"))
+
+# Calculate UCell score for each lineage marker signature of CD8cell subset
+rCD8 <- AddModuleScore_UCell(rCD8, features = TNKmarkers, ncores = 8)
+CD8_Ulineage <- FetchData(rCD8, vars = c("patient", "TCR", "cloneID", "clonePT", "reactivity", "seurat_clusters", "CD4T_UCell", "CD8T_UCell", "CD4CD8T_UCell", "NK_UCell", "MAIT_UCell", "gdT_UCell", "UPreactivity_UCell", "DNreactivity_UCell", "reactivity_UCell"))
+
+## Calculate AUCell score for each lineage marker signature of CD8cell subset
+CD8_AUClineage <- AUCell_run(CD8norm, TNKmarkers, BPPARAM = BiocParallel::MulticoreParam(8))
+save(CD8_AUClineage, file = "CD8_AUClineage.RData")
+
+
+stackedViolin.UCell(rCD8, TNKmarkers.names, "T/NK lineage", "cluster of CD8cell subset")
+#stackedViolin.AUCell(CD8_AUClineage, TNKmarkers.names, "T/NK lineage", "cluster of CD8cell subset")
+```
+
+
+# ----------------------------------------------------------------------------------------------------------
+## Tumor reactivity marker scores for TNK2 subset & intgHar dataset
+```{r Separate UP & DN markers, fig.width=8, fig.height=6, include=TRUE}
+UP <- MCD8 %>% filter(avg_log2FC > 0)
+UP <- UP$gene
+DN <- MCD8 %>% filter(avg_log2FC < 0)
+DN <- DN$gene
+
+CD8ReactivityMarkers <- list()
+CD8ReactivityMarkers$UPreactivity <- UP
+CD8ReactivityMarkers$DNreactivity <- DN
+CD8ReacM.names <- paste0(names(CD8ReactivityMarkers), "_UCell")
+```
+
+
+```{r scores of reactivity for TNK2 & intgHar, include=TRUE, fig.width=12, fig.height=5}
+## Calculate UCell score for tumor reactivity signature of TNK2 subset
+intgHarTNK2 <- AddModuleScore_UCell(intgHarTNK2, features = CD8ReactivityMarkers, ncores = 8)
+intgHar <- 
+TNK2_Ureactivity <- FetchData(intgHarTNK2, vars = c("patient", "TCR", "cloneID", "clonePT", "reactivity", "seurat_clusters", "CD4T_UCell", "CD8T_UCell", "CD4CD8T_UCell", "NK_UCell", "MAIT_UCell", "gdT_UCell", "UPreactivity_UCell", "DNreactivity_UCell", "reactivity_UCell")) %>% 
+  filter(TCR == "yes") %>% 
+  rownames_to_column(var = "cell")
+
+
+#allContig <- list.files("/home/localadmin/Desktop/RESEARCH/SBobisse/Analysis/CrCr_TCR.GEX/ContigAnnotation", pattern = ".csv", full.names = T)
+
+
+CrCp4_Ureac <- TNK2_Ureactivity %>% 
+  filter(patient == "CrCp4") %>% 
+  arrange(cloneID) %>% 
+  separate(col = cell, into = c(NA, "cell"), remCre = T, sep = "_")
+
+CrCp4_contig <- data.table::fread(list.files("/home/localadmin/Desktop/RESEARCH/SBobisse/Analysis/CrCr_TCR.GEX/ContigAnnotation", pattern = "CrCp4", full.names = T)) %>% 
+  filter(barcode %in% CrCp4_Ureac$cell & is_cell == TRUE & full_length == TRUE & productive == TRUE) %>%
+  group_by(barcode) %>% 
+  filter(n()>1) %>% 
+  select(-c(is_cell, high_confidence, full_length, productive))
+
+
+## Calculate AUCell score for tumor reactivity signature of TNK2 subset
+TNK2_AUCreact <- AUCell_run(TNK2norm, CD8ReactivityMarkers, BPPARAM = BiocParallel::MulticoreParam(8))
+save(TNK2_AUCreact, file="TNK2_AUCreactivity.RData")
+
+## Violin plots of scores
+intgHarTNK2$reactivity_UCell <- intgHarTNK2$UPreactivity_UCell - intgHarTNK2$DNreactivity_UCell
+stackedViolin.UCell(intgHarTNK2, c("UPreactivity_UCell", "DNreactivity_UCell", "reactivity_UCell"), "tumor reactivity", "cluster of TNK2 subset")
+```
+
+
+# ----------------------------------------------------------------------------------------------------------
+## Tumor reactivity marker scores for CD8cell subset
+```{r UCell scores of reactivity for CD8cells, include=TRUE, fig.width=10, fig.height=5}
+## Calculate UCell score for tumor reactivity signature of TNK2 subset
+rCD8 <- AddModuleScore_UCell(rCD8, features = CD8ReactivityMarkers, ncores = 8)
+rCD8$reactivity_UCell <- rCD8$UPreactivity_UCell - rCD8$DNreactivity_UCell
+
+## Calculate AUCell score for tumor reactivity signature of TNK2 subset
+CD8_AUCreact <- AUCell_run(CD8norm, CD8ReactivityMarkers, BPPARAM = BiocParallel::MulticoreParam(8))
+save(CD8_AUCreact, file="CD8_AUCreactivity.RData")
+
+## Violin plots of scores
+stackedViolin.UCell(rCD8, c("UPreactivity_UCell", "DNreactivity_UCell", "reactivity_UCell"), "tumor reactivity", "cluster of CD8cell subset")
+```
+
+
+
+```{r Venn}
+u <- ggVennDiagram(list(UP.Sub, UP.Trp, UP.CD8), label_alpha = 0, show_intersect = T,
+              label = "both", label_color = "magenta", # NOT working with show_intersect = T
+              category.names = c("UP.subset-reactivity", "UP.non-CD4cluster", "UP.CD8cells"))
+u
+      #+
+  #scale_fill_gradient(low = "white", high = "red") # NOT working!!!
+
+
+d <- ggVennDiagram(list(DN.Sub, DN.Trp, DN.CD8), label_alpha = 0, show_intersect = T,
+              label = "both", set_color = "red", # NOT working with show_intersect = T
+              category.names = c("DN.subset-reactivity", "DN.non-CD4cluster", "DN.CD8cells"))
+d
+
+```
+# ----------------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------
+
+
+
+
+```{r umap TNK2 with cluster labels & reactivity, include=TRUE, fig.width=22 , fig.height=11, eval=FALSE}
+
+p7 <- DimPlot(intgHarTNK2, reduction = "umap", label = T, repel = T, label.size = 9,
+              cols = cluster_colors_TNK2) #default active.ident = "seurat_clusters"
+p8 <- DimPlot(intgHarTNK2, reduction = "umap", label = F, pt.size = 1.5,
+              group.by = "reactivity", order = c("reactive", "nonreactive", "ND"),
+              cols = c("grey85", "cornflowerblue", "brown1"))
+p7 + p8
+
+```
+

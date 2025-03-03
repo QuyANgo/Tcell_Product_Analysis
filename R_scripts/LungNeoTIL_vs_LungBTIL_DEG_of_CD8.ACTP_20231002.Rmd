@@ -1,0 +1,1117 @@
+---
+title: "LungNeoTIL vs. LungBTIL - DEG of ACTP - scGEX 20231002 "
+author: "Quy Ai Ngo"
+date: "02-Oct-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+setwd("/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX/Lung.NeoTIL_vs_Lung.BTIL/20231002")
+mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud/"
+```
+
+
+```{r load libraries, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+library(Seurat)
+library(harmony)
+#library(MAST)
+
+library(Matrix)
+library(scater)
+library(scran)
+library(clustree)
+
+library(SingleR)
+library(celldex)
+
+# library(SCPA)
+# library(msigdbr)
+# library(ComplexHeatmap)
+
+library(tidyverse)
+library(ggnewscale)
+library(magrittr)
+library(stringr)
+library(scales)
+library(ggpubr)
+library(cowplot)
+library(patchwork)
+library(EnhancedVolcano)
+library(RColorBrewer)
+library(randomcoloR)
+library(viridis)
+library(rstatix)
+library(ggsignif)
+
+library(knitr)
+library(kableExtra)
+library(reactable)
+
+```
+# 20231002 STARTS BELOW at LINE 843 !!!!!!
+
+
+# Below pipeline to make NeoBTIL seurat object is the same as CrOv.9patients pipeline on 20230504
+# 1. Get GEX data
+```{r load GEX data}
+
+## Load raw dataset (10x Genomics format)
+mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud"
+
+# get expression matrices
+get.sc.exp.mat <- function(i, ...){
+  dataDir <- paste0(mainDir, "/DATA_SC/NeoTIL/Raw/",
+                    i, "/GEX/single-cell/ACTP/outs/filtered_feature_bc_matrix")
+  print(dataDir)
+  print(list.files(dataDir))
+  Seurat::Read10X(data.dir = dataDir)
+}
+
+nameAll <- c("1EDA", "1HU3", "1JA0", "1JOC")
+listGEX <- lapply(nameAll, get.sc.exp.mat)
+
+# IMPORTANT : Make sure name list matches the order of loaded data list!!!
+names(listGEX) <- nameAll
+names(listGEX)
+str(listGEX[[1]])
+
+```
+
+
+# 2. Get all cells from VDJ data
+``` {r get TCR contig annotations from TCR-cellranger results for individual patients}
+
+nameTCR <- c("1EDAtcr", "1HU3tcr", "1JA0tcr", "1JOCtcr")
+
+# Fetch all contigs (regardless of chain number)
+TCRcontig <- function(i) {
+  contig <- data.table::fread(paste0(mainDir, "/DATA_SC/NeoTIL/Raw/", i, 
+                                     "/TCR/single-cell/ACTP/outs/all_contig_annotations.csv")) %>%
+    filter(is_cell == "TRUE" & full_length == "TRUE" & productive == "TRUE") %>% 
+    select(barcode, contig_id, chain, cdr3, v_gene, j_gene, raw_clonotype_id) %>% 
+    data.table::setnames("raw_clonotype_id", "Clonotype") %>%
+    unite(col = cdr3_clone, v_gene, cdr3, j_gene)
+    
+  chA <- contig %>% filter(chain == "TRA") %>% arrange(barcode, contig_id) 
+  dA <- chA %>% group_by(barcode) %>% dplyr::summarise(chainA = paste0(cdr3_clone, collapse = ";"))
+  chB <- contig %>% filter(chain == "TRB") %>% arrange(barcode, contig_id) 
+  dB <- chB %>% group_by(barcode) %>% dplyr::summarise(chainB = paste0(cdr3_clone, collapse = ";"))
+  dAB <- full_join(dA, dB, by = "barcode")
+
+  uniqContig <- contig %>% distinct(barcode, .keep_all = T) %>%
+    select(barcode, Clonotype) %>%
+    left_join(dAB, by = "barcode") #%>%
+    # separate(chainA, c("TRA_1", "TRA_2"), "; ") %>% 
+    # separate(chainB, c("TRB_1", "TRB_2"), "; ") 
+  write.table(dAB, paste0(i, "_all.cells_with.TCR_20231002.txt"),
+               append = F, quote = F, row.names = F, sep = "\t")
+  rm(chA, chB, dA, dB, contig); invisible(gc()); gc()
+  return(dAB)
+}
+
+listTCRcontig <- lapply(nameAll, TCRcontig)
+names(listTCRcontig) <- nameTCR
+lapply(listTCRcontig, dim)
+
+```
+
+
+# 5. Combine GEX barcodes and TCRcontigs (including tested TCR info)
+```{r Get cell barcode lists for all GEX samples & combine all needed variables}
+
+# test with 1 sample
+# GEX <- listGEX[[1]]
+# TCR <- listTCRcontig[[1]]
+## testTCR <- listTCRcontigTest[[1]] # NOT HAVING THIS!
+
+combine.GEX.TCR <- function(GEX, TCR) {
+  spl <- data.frame(barcode = colnames(GEX)) %>% 
+    left_join(TCR, by = "barcode") %>%
+    #left_join(testTCR, by = "barcode") %>% 
+    #select(!alphaClone) %>% select(!betaClone) %>% 
+    data.table::setnames(c("chainA", "chainB"), c("alphaClone", "betaClone")) %>% 
+    #arrange(desc(cloneID)) %>%
+    replace(is.na(.), "ND") %>%
+    mutate(alphaClone = ifelse(alphaClone == "ND", "undetected", alphaClone)) %>% 
+    mutate(betaClone = ifelse(betaClone == "ND", "undetected", betaClone)) %>% 
+    #mutate(cloneID = ifelse(cloneID == "ND" & (alphaClone != "undetected" | betaClone != "undetected"), "unassignedTCR", cloneID)) %>% 
+    mutate(TCR_presence = ifelse(alphaClone == "undetected" & betaClone == "undetected", "no", "yes")) %>% # CHANGED!
+    column_to_rownames(var = "barcode")
+  
+  return(spl)
+}
+listGEXTCR <- Map(combine.GEX.TCR, listGEX, listTCRcontig)
+head(listGEXTCR[[2]])
+tail(listGEXTCR[[2]])
+lapply(listGEXTCR, dim)
+
+```
+
+
+
+# 6. Create Seurat object with 4 NeoBTIL
+```{r Create a Seurat object with the raw (non-normalized data) excluding CrCm4}
+
+create.seurat <- function(GEXdata, splName, GEXTCRdata, ...){
+  CreateSeuratObject(counts = GEXdata, 
+                     project = splName,
+                     min.cells = 10, #round(0.01*ncol(i)), 
+                     min.features = 200,
+                     meta.data = GEXTCRdata)
+}
+
+listSeu <- mapply(create.seurat, listGEX, nameAll, listGEXTCR)
+names(listSeu) <- nameAll
+
+# Add protocol type & Protocol
+for (i in (1:2)) {
+  listSeu[[i]]$Protocol <- "BTIL"
+}
+for (i in (3:4)) {
+  listSeu[[i]]$Protocol <- "NeoTIL"
+}
+
+# rename active.ident to sample name
+# listSeu <- mapply(SetIdent, listSeu, value = nameAll)
+# str(listSeu)
+# head(listSeu[[2]]@meta.data)
+
+# merge all NeoBTIL Seurat objects into 1
+NeoB <- merge(x = listSeu[[1]],
+              y = listSeu[2:4],
+              project = "Lung.NeoTIL.BTIL",
+              add.cell.ids = nameAll,
+              merge.data = FALSE #TRUE if all samples were normalized the same way, merge the data slot instead of just the counts
+              )
+
+# Add percent.mt
+NeoB[["percent.mt"]] <- PercentageFeatureSet(NeoB, pattern = "^MT-")
+
+# Filter merged seurat object
+NeoB <- subset(NeoB, 
+               subset = nFeature_RNA <= 7000 & nFeature_RNA >= 200 &
+                        nCount_RNA <= 50000 & 
+                        percent.mt <= 10)
+
+# Add percent.ribo
+NeoB[["percent.ribo"]] <- PercentageFeatureSet(NeoB, pattern = "^RP[SL][[:digit:]]")
+
+# Add CELL CYCLE MARKERS from Tirosh et al 2015 to meta.data (already in Seurat)  
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes  
+NeoB <- CellCycleScoring(NeoB,
+                         s.features = s.genes, 
+                         g2m.features = g2m.genes, 
+                         set.ident = F)
+NeoB$CCdiff <- NeoB$S.Score - NeoB$G2M.Score
+
+dim(NeoB)
+head(NeoB@meta.data,3)
+
+# Set new identity and add patientID as identity class
+NeoB <- SetIdent(NeoB, value = "orig.ident")
+NeoB$Patient <- NeoB$orig.ident
+NeoB$SampleID <- paste(NeoB$Protocol, NeoB$Patient, sep = ".")
+
+NeoB$Protocol <- factor(NeoB$Protocol, levels = c("NeoTIL", "BTIL"))
+NeoB$Patient <- factor(NeoB$Patient, levels = nameAll)
+NeoB$SampleID <- factor(NeoB$SampleID, levels = c(unique(NeoB$SampleID)))
+NeoB$TCR_presence <- factor(NeoB$TCR_presence, levels = c("yes", "no"))
+NeoB$Phase <- factor(NeoB$Phase, levels = c("G1", "S", "G2M"))
+
+unique(NeoB$Protocol)
+unique(NeoB$Patient)
+unique(NeoB$SampleID)
+unique(NeoB$TCR_presence)
+unique(NeoB$Phase)
+
+```
+
+
+
+```{r Run Seurat pipeline to normalize, eval=FALSE}
+
+obj <- as.SingleCellExperiment(NeoB)
+
+# Pre-cluster with 100 cells/cluster
+# normalize pre-clustered data with scater
+# transform sc object back to Seurat object
+cl100 = scran::quickCluster(obj, min.size = 100) # can change this default min.size
+obj = scran::computeSumFactors(obj, cluster = cl100)
+obj= scater::logNormCounts(obj,
+                           log = T,
+                           transform = "log",
+                           pseudo_count = 1)
+obj <- as.Seurat(obj, counts = "counts", data = "logcounts")
+Idents(obj) <- obj$SampleID
+
+unique(obj$Protocol)
+unique(obj$Patient)
+unique(obj$SampleID)
+unique(obj$TCR_presence)
+unique(obj$Phase)
+
+```
+
+
+
+```{r regress & scale normalized merged object, eval=FALSE}
+
+# regress & scale
+obj <- ScaleData(obj, 
+                 features = rownames(obj),
+                 vars.to.regress = c("nCount_RNA", "nFeature_RNA", "CCdiff",
+                                     "percent.mt", "percent.ribo"))
+# Find HVGs using default parameters
+obj <- FindVariableFeatures(obj,
+                            selection.method = "vst",
+                            nfeatures = 2000,
+                            mean.function = ExpMean,
+                            dispersion.function = LogVMR,
+                            num.bin = 40,
+                            binning.method = "equal_width", # "equal_frequency"
+                            mean.cutoff = c(0.1, 8), #c(0.0125, 4),
+                            dispersion.cutoff = c(1, Inf)) #c(0, Inf)) # c(0, 0.4)
+
+# Dimensional reduction with PCA (already have pca reduction from individual samples, this is the PCA for merged data)
+obj <- RunPCA(obj,
+              features = VariableFeatures(obj),
+              npcs = 50,
+              ndims.print = 1:10,
+              nfeatures.print = 10,
+              reduction.key = 'PC_',
+              reduction.name = 'PCA')
+
+saveRDS(obj, "Lung.NeoTIL.BTIL_ACTP_norm.regress.hvg.pca_20231002.rds")
+
+rm(listGEX, listGEXTCR, listSeu, listTCRcontig, NeoB, cl100, g2m.genes, s.genes); invisible(gc()); gc()
+
+```
+
+
+```{r QC graphics of norm.scale data, eval=FALSE}
+
+# Merged data histograms
+pdf("Lung.NeoTIL.BTIL_ACTP_QC.histograms_20231002.pdf", width = 16, height = 7)
+par(mfrow = c(1,4))
+hist(obj$nCount_RNA, freq = T, col = 'wheat',
+     main = "Lung.NeoTIL.BTIL_ACTP count numbers",
+     xlab = "count numbers")
+hist(obj$nFeature_RNA, col = 'wheat', 
+     main = "Lung.NeoTIL.BTIL_ACTP gene numbers",
+     xlab = "gene numbers")
+hist(obj$percent.mt, col = 'wheat', 
+     main = "Lung.NeoTIL.BTIL_ACTP % MT genes",
+     xlab = "percentage")
+hist(obj$percent.ribo, col = 'wheat', 
+     main = "Lung.NeoTIL.BTIL_ACTP % Rb genes",
+     xlab = "percentage")
+dev.off()
+
+# check gene expression before, after normalization, regression & scaling
+pdf("Lung.NeoTIL.BTIL_ACTP_QC.UMIcounts_before&after_normalization-regress.scaling_20231002.pdf", width = 12, height = 7)
+par(mfrow = c(1,3))
+hist(colSums(obj@assays$RNA@counts),
+     breaks = 100,
+     col = 'wheat',
+     main = "before normalization",
+     xlab = "Sum of expression")
+hist(colSums(obj@assays$RNA@data),
+     breaks = 100,
+     col = 'wheat',
+     main = "after normalization",
+     xlab = "Sum of expression")
+hist(colSums(obj@assays$RNA@scale.data),
+     breaks = 100,
+     col = 'wheat',
+     main = "after norm-regress-scaling",
+     xlab = "Sum of expression")
+dev.off()
+  
+pdf("Lung.NeoTIL.BTIL_ACTP_QC.featureScatter_20231002.pdf", width = 16, height = 9)
+p1 <- FeatureScatter(obj, pt.size = 0.1, feature1 = "nCount_RNA", feature2 = "percent.mt")
+p2 <- FeatureScatter(obj, pt.size = 0.1, feature1 = "nCount_RNA", feature2 = "percent.ribo")
+p3 <- FeatureScatter(obj, pt.size = 0.1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+p1 + p2 + p3
+dev.off()
+  
+pdf("Lung.NeoTIL.BTIL_ACTP_QC.violinPlots_20231002.pdf", width = 12, height = 26)
+VlnPlot(obj, 
+        features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"),
+        pt.size = 0,
+        ncol = 1)
+dev.off()
+
+# Visualize PCA
+pdf("Lung.NeoTL.BTIL_ACTP_PCA_color.by_Protocol.Patient_20231002.pdf", width = 16, height = 6)
+DimPlot(obj, 
+        dims = c(1, 2),
+        group.by = c("SampleID"),
+        reduction = "PCA"
+       )
+dev.off()
+
+pdf("Lung.NeoTIL.BTIL_ACTP_PCA_color.by_Protocol_&_split.by_Patient_20231002.pdf", width = 36, height = 4)
+DimPlot(obj, 
+        dims = c(1, 2),
+        group.by = "Protocol",
+        split.by = "Patient",
+        reduction = "PCA"
+        )
+dev.off()
+
+pdf("Lung.NeoTIL.BTIL_ACTP_PCA_color.by_Patient_&_split.by_Protocol_20231002.pdf", width = 16, height = 6)
+DimPlot(obj, 
+        dims = c(1, 2),
+        group.by = "Patient",
+        split.by = "Protocol",
+        reduction = "PCA"
+        )
+dev.off()
+
+```
+
+
+```{r run Harmony on merged data to correct PCA, eval=FALSE}
+# "Samples" is the variable with the highest batch effect
+
+intgHar <- RunHarmony(
+  object = obj,
+  group.by.vars = c("SampleID"), # covariates to be removed, affected by theta & lambda below
+  reduction = "PCA",
+  dims.use = 1:50, # default all PCs
+  theta = 2, # default; larger for more diverse clusters, 0 for no diversity
+  lambda = 1, # default; smaller results in more aggressive correction
+  sigma = 0.1, # default; larger results in cells assigned to more cluster
+  #nclust = NULL, # 1 = simple linear regression
+  #tau = 0, # expected number of cells per cluster, protection against overclustering small datasets with larger ones
+  block.size = 0.01, # default; larger -> faster but less accurate
+  max.iter.harmony = 10,
+  max.iter.cluster = 20,
+  epsilon.cluster = -Inf, # set to -Inf to never stop convergence early
+  epsilon.harmony = -Inf, # set to -Inf to never stop convergence early
+  plot_convergence = TRUE,
+  verbose = TRUE,
+  reference_values = NULL,
+  reduction.save = "Harmony",
+  assay.use = "RNA",
+  project.dim = T
+)
+
+intgHar$ident <- NULL
+
+saveRDS(intgHar, "intgHar.ACTP_from_Lung.NeoTIL.BTIL_20231002.rds")
+rm(obj); invisible(gc()); gc()
+
+```
+
+
+``` {r visualization}
+# Visualize Harmony-corrected PCA
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_correctedPCs_color.by_Protocol.Patient_20231002.pdf", width = 16, height = 4)
+DimPlot(intgHar, 
+        dims = c(1, 2),
+        group.by = c("SampleID"), # current active.ident
+        reduction = "Harmony")
+dev.off()
+
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_correctedPCs_color.by_Protocol_&_split.by_Patient_20231002.pdf", width = 32, height = 4)
+DimPlot(intgHar, 
+        dims = c(1, 2),
+        group.by = "Protocol",
+        split.by = "Patient",
+        reduction = "Harmony"
+        )
+dev.off()
+
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_correctedPCs_color.by_Patient_&_split.by_Protocol_20231002.pdf", width = 16, height = 4)
+DimPlot(intgHar, 
+        dims = c(1, 2),
+        group.by = "Patient",
+        split.by = "Protocol",
+        reduction = "Harmony"
+        )
+dev.off()
+
+# VizDimLoading plot
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_topGenes_associated_with_50Harmonys_20231002.pdf", width = 22, height = 50)
+VizDimLoadings(intgHar, dims = 1:50, reduction = "Harmony", ncol = 5) + # patchwork object
+  plot_annotation(title = "Lung.NeoTIL.BTIL top genes associated with 50 Harmonys")
+dev.off()
+
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_topGenes_associated_with_50PCs_20231002.pdf", width = 22, height = 50)
+VizDimLoadings(intgHar, dims = 1:50, reduction = "PCA", ncol = 5) + # patchwork object
+  plot_annotation(title = "Lung.NeoTIL.BTIL top genes associated with 50 PCs")
+dev.off()
+
+
+# Heatmap of top 20 HVGs associated with the first 50 Harmonys/PCs
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_heatmap_of_top20.HVGs_50Harmonys_20231002.pdf", width = 14, height = 30)
+DimHeatmap(intgHar, dims = 1:50, cells = 500, nfeatures = 20, ncol = 5,
+           reduction = 'Harmony', assays = 'RNA', slot = 'scale.data',
+           balanced = TRUE, combine = TRUE, fast = FALSE) +
+  plot_annotation("Lung.NeoTIL.BTIL - heatmap of top 20 HVGs in 50 Harmonys")
+dev.off()
+
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_heatmap_of_top20.HVGs_50PCs_20231002.pdf", width = 14, height = 30)
+DimHeatmap(intgHar, dims = 1:50, cells = 500, nfeatures = 20, ncol = 5,
+           reduction = 'PCA', assays = 'RNA', slot = 'scale.data',
+           balanced = TRUE, combine = TRUE, fast = FALSE) +
+  plot_annotation("Lung.NeoTIL.BTIL - heatmap of top 20 HVGs in 50 PCs")
+dev.off()
+
+
+# Find the best numbers of harmony/ PCs
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_ElbowPlot_20231002.pdf")
+ElbowPlot(intgHar, ndims = 50, reduction = "Harmony")
+dev.off()
+
+```
+
+
+
+```{r find optimal k and res for umap with 20pcs, eval=FALSE}
+
+# 20 PCs identified from Elbow plot, VizDimLoading & heatmap for Harmony and 50 PCs for non-integrated data
+for (k in c(20, 25, 30)) {
+  intgH <- FindNeighbors(intgHar, 
+                         reduction = "Harmony", # VERY IMPORTANT: "Harmony" !!!!
+                         dims = 1:20, # as found by Elbow plot
+                         k.param = k, # default 20, can also test 30
+                         annoy.metric = "euclidean" # default "euclidean"; can also test "cosine"
+                         )
+  intgH <- FindClusters(intgH, algorithm = 1, #4 Leiden, not default Louvain #1
+                        resolution = seq(0.1, 1, 0.1))
+  # Use clustree to look at clusterings at different resolution
+  pdf(paste0("intgHar.ACTP_Lung.NeoTIL.BTIL_clustree.20pc.k", k, "_20231002.pdf"), width = 9, height = 16)
+  print(clustree(intgH, prefix = "RNA_snn_res."))
+  dev.off()
+  rm(intgH); invisible(gc()); gc()
+}
+
+```
+
+
+
+```{r Re-find neighbors & clusters with selected pc, k & optimal resolution, then umap include=FALSE}
+
+# From above results, select 20pc and k30 with 0.6res
+intgHar <- FindNeighbors(intgHar, 
+                         reduction = "Harmony", # VERY IMPORTANT: "Harmony" !!!!
+                         dims = 1:20, # as found by Elbow plot
+                         k.param = 30, # default 20, can also test 30
+                         annoy.metric = "euclidean" # default "euclidean"; can also test "cosine"
+                         )
+intgHar <- FindClusters(intgHar, algorithm = 1,
+                        resolution = 0.6)
+
+## Tabulate cells by cluster ID, replicate, or both
+cellNumber <- c(table(Idents(intgHar)))
+cell_proportion <- c(prop.table(table(Idents(intgHar))))
+clustInfo <- data.frame(cellNumber, cell_proportion)
+clustInfo <- rownames_to_column(clustInfo, var = "clusterID")
+write.table(clustInfo, "intgHar.ACTP_Lung.NeoTIL.BTIL_20pc.k30_0.6res_table_20231002.txt",
+            append = F, quote = F, row.names = F, col.names = T, sep = "\t")
+
+intgHar <- RunUMAP(intgHar,
+                   reduction = "Harmony",  
+                   dims = 1:20,
+                   n.neighbors = 30, #default 30, range 5-50, large n for preserved global structure while loss of detailed local structure, use same k as in FindNeighbors for consistent results!!! 
+                   min.dist = 0.2, #default 0.3, range 0.001-0.5, large dist for evenly distributed embedded points, small for optimizing accuracy of local structure
+                   spread = 1, 
+                   metric = "cosine", #default "cosine" to separate clusters better than "euclidean"
+                   seed.use = 1)
+
+```
+
+
+
+### ------------------------------------------------------------------------
+### ------------------------------------------------------------------------
+# UMAP with various variables
+```{r Visualize harmony-embedded merged data on umap, include=TRUE, fig.width=16, fig.height=6}
+cluster_colors <- distinctColorPalette(length(unique(intgHar$seurat_clusters)))
+
+p1 <- DimPlot(intgHar, reduction = "umap", group.by = "seurat_clusters",
+              label = T, repel = T, label.size = 5.5,
+              cols = cluster_colors) #default active.ident = "seurat_clusters"
+p2 <- DimPlot(intgHar, reduction = "umap", label = F,
+              group.by = "SampleID")
+p3 <- DimPlot(intgHar, reduction = "umap", label = F, 
+              group.by = "Protocol")
+p1 + p2 + p3
+
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_various.umaps_20231002.pdf", width = 16, height = 6)
+print(p1 + p2 + p3)
+dev.off()
+
+```
+
+
+# Expression of canonical cell-type markers on umap :
+```{r feature plot canonical markers, include=TRUE,  fig.width=9, fig.height=12}
+
+cellType <- c("CD3E", "CD8A", "CD4", "KLRD1", "CD79A", "VCAM1")
+DefaultAssay(intgHar) <- "RNA"
+#intgHar$ident <- NULL # VERY IMPORTANT TO GET RID OF ident class with patient name, otherwise the cluster labels take this ident class !!!
+#Idents(intgHar) <- "seurat_clusters"
+
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_featurePlots_lineage.markers_20231002.pdf", width = 9, height = 12)
+FeaturePlot(intgHar,
+            features = cellType,
+            reduction = "umap", slot = "data",
+            cols = rev(brewer.pal(11, "Spectral")),
+            label = TRUE, repel = TRUE, label.size = 5.5, label.color = "magenta",
+            order = TRUE, by.col = TRUE, combine = T, ncol = 2
+           ) +
+  plot_annotation(title = "Lung.NeoTIL.BTIL canonical cell lineage markers",
+                    theme = theme(plot.title = element_text(size = 24))
+    )
+dev.off()
+
+```
+
+
+```{r load Monaco reference}
+Monaco <- MonacoImmuneData(cell.ont = "none")
+blEnc <- BlueprintEncodeData(cell.ont = "none")
+```
+
+
+```{r obtain celldex data}
+
+exp <- GetAssayData(intgHar, "data")
+main.Monaco <- SingleR(test = exp, ref = Monaco, labels = Monaco$label.main)
+fine.Monaco <- SingleR(test = exp, ref = Monaco, labels = Monaco$label.fine)
+main.blEnc <- SingleR(test = exp, ref = blEnc, labels = blEnc$label.main)
+fine.blEnc <- SingleR(test = exp, ref = blEnc, labels = blEnc$label.fine)
+
+table(main.Monaco$pruned.labels)
+#table(fine.Monaco$pruned.labels)
+table(main.blEnc$pruned.labels)
+#table(fine.blEnc$pruned.labels)
+
+write.table(main.Monaco, "intgHar.ACTP_Lung.NeoTIL.BTIL_SingleRlabels.Monaco.main_20231002.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+write.table(fine.Monaco, "intgHar.ACTP_Lung.NeoTIL.BTIL_SingleRlabels.Monaco.fine_20231002.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+write.table(main.blEnc, "intgHar.ACTP_Lung.NeoTIL.BTIL_SingleRlabels.blueprintEncode.main_20231002.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+write.table(fine.blEnc, "intgHar.ACTP_Lung.NeoTIL.BTIL_SingleRlabels.blueprintEncode.fine_20231002.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+
+rm(clustInfo, exp, blEnc, Monaco, fine.blEnc, fine.Monaco, cell_proportion, cellNumber, k)
+invisible(gc); gc()
+
+```
+
+
+```{r add Monaco/blueprintENCODE to intgHar}
+
+intgHar <- AddMetaData(intgHar, main.Monaco$pruned.labels, col.name = "Monaco.main")
+#intgHar <- AddMetaData(intgHar, fine.Monaco$pruned.labels, col.name = "Monaco.fine")
+intgHar$Monaco.main <- factor(intgHar$Monaco.main, levels = unique(intgHar$Monaco.main))
+#intgHar$Monaco.fine <- factor(intgHar$Monaco.fine, levels = unique(intgHar$Monaco.fine))
+
+intgHar <- AddMetaData(intgHar, main.blEnc$pruned.labels, col.name = "blueprintEncode.main")
+#intgHar <- AddMetaData(intgHar, fine.blEnc$pruned.labels, col.name = "blueprintEncode.fine")
+intgHar$blueprintEncode.main <- factor(intgHar$blueprintEncode.main, levels = unique(intgHar$blueprintEncode.main))
+#intgHar$blueprintEncode.fine <- factor(intgHar$blueprintEncode.fine, levels = unique(intgHar$blueprintEncode.fine))
+
+```
+
+
+```{r assign CD4/CD8 cells}
+
+# Re-run FindClusters at resolution 5 to obtain small cluster size
+intgHar <- FindClusters(intgHar, resolution = 5)
+
+# Fetch data from intgHar & assign CD8/CD4 celltype
+df <- FetchData(intgHar, slot = "data", vars = c("RNA_snn_res.5", "CD8A", "CD8B", "CD4")) %>% 
+  mutate(CellType = ifelse((CD8A > 0 | CD8B > 0) & CD4 == 0, "CD8", 
+                           ifelse(CD8A == 0 & CD8B == 0 & CD4 > 0, "CD4",
+                                  ifelse((CD8A > 0 | CD8B > 0) & CD4 > 0, "DP",
+                                         "DN")))) %>%
+  rownames_to_column(var = "cellID")
+
+# Re-assign DN cells with 75% quantile values of CD8A, CD8B & CD4 per cluster at res3
+## Calculate 75% quantile values 
+quantCD8A <- as.data.frame(tapply(df$CD8A, df$RNA_snn_res.5, function(x){quantile(x,probs=0.75)})) %>%
+  rownames_to_column(var = "cluster.res5")
+quantCD8B <- as.data.frame(tapply(df$CD8B, df$RNA_snn_res.5, function(x){quantile(x,probs=0.75)})) %>%
+  rownames_to_column(var = "cluster.res5")
+quantCD4 <- as.data.frame(tapply(df$CD4, df$RNA_snn_res.5, function(x){quantile(x,probs=0.75)})) %>%
+  rownames_to_column(var = "cluster.res5")
+quant <- left_join(quantCD8A, quantCD8B) %>% left_join(quantCD4)
+names(quant) <- c("cluster.res5", "CD8A.quant", "CD8B.quant", "CD4.quant")
+
+quant <- quant %>%
+    mutate(celltype = ifelse((CD8A.quant > 0 | CD8B.quant > 0) & CD4.quant == 0, "CD8", 
+                           ifelse(CD8A.quant == 0 & CD8B.quant == 0 & CD4.quant > 0, "CD4",
+                                  ifelse((CD8A.quant > 0 | CD8B.quant > 0) & CD4.quant > 0, "DP",
+                                         "DN")))) %>%
+arrange(celltype)
+
+CD4cl <- quant %>% filter(celltype == "CD4")
+CD4cl <- CD4cl$cluster.res5
+CD8cl <- quant %>% filter(celltype == "CD8")
+CD8cl <- CD8cl$cluster.res5
+DPcl <- quant %>% filter(celltype == "DP")
+DPcl <- DPcl$cluster.res5
+DNcl <- quant %>% filter(celltype == "DN")
+DNcl <- DNcl$cluster.res5
+
+## Extract DN cells from df and re-assign them
+dfDN <- df %>% filter(CellType == "DN") %>% 
+  mutate(CellType = ifelse(RNA_snn_res.5 %in% CD4cl, "CD4",
+                           ifelse(RNA_snn_res.5 %in% CD8cl, "CD8",
+                                  ifelse(RNA_snn_res.5 %in% DPcl, "DP",
+                                         "DN")))) %>%
+  select(cellID, CellType)
+
+## Extract non-DN cells from df
+dfOthers <- df %>% filter(CellType != "DN") %>%
+  select(cellID, CellType)
+
+## Combine dfOthers & dfDN to get complete df with CD4/CD8 cell types
+dfAll <- rbind(dfOthers, dfDN)
+meta <- df %>% select(cellID) %>% left_join(dfAll, by = "cellID") %>%
+  column_to_rownames(var = "cellID") %>% replace(is.na(.), "unknown")
+
+# Add CD4/CD8 cell types to intgHar
+intgHar <- AddMetaData(intgHar, meta)
+intgHar$CellType <- factor(intgHar$CellType, levels = c("CD8", "CD4", "DP")) # no DN !!!
+
+saveRDS(intgHar, "intgHar.ACTP_Lung.NeoTIL.BTIL_cell.labels_20231002.rds")
+
+```
+
+
+```{r Dimplots, fig.width=13, fig.height=12}
+# Verify cell type assignments in fine clusters at res5
+
+colorRes5 <- distinctColorPalette(length(unique(intgHar$RNA_snn_res.5)))
+
+p <- DimPlot(intgHar, reduction = "umap", group.by = "RNA_snn_res.5",
+              label = T, repel = T, label.size = 5.5,
+             cols = colorRes5
+) #default active.ident = "seurat_clusters" at res5
+p
+p0 <- DimPlot(intgHar, reduction = "umap", group.by = "CellType",
+              #label = T, repel = T, label.size = 7.5,
+              cols = c("lightblue", "seagreen", "gold1", "magenta")
+) #default active.ident = "seurat_clusters" at res3
+p0
+p1 <- DimPlot(intgHar, reduction = "umap", group.by = "Monaco.main",
+              #label = T, repel = T, label.size = 7.5,
+              cols = c("lightblue", "yellow", "seagreen", "tomato", "blue", "magenta", "red")
+              # CD8, T, CD4, NK, DC, Mono, B, NA
+)
+p1
+p3 <- DimPlot(intgHar, reduction = "umap", group.by = "blueprintEncode.main",
+              #label = T, repel = T, label.size = 7.5,
+              cols = c("lightblue", "tomato", "seagreen", "pink", "orange", "blue", "gold1", "magenta", "red")
+              # CD8, NK, CD4, eryth, HSC, DC, macro, mono, B, NA
+)
+p3
+
+pdf("intgHar.ACTP_Lung.NeoTIL.BTIL_umaps_with_cellLabels_20231002.pdf", width = 13, height = 12)
+p; p0; p1; p3
+dev.off()
+
+``` 
+
+
+
+```{r subset CD8 cells}
+`%nin%` = Negate(`%in%`)
+
+# Subset CD8 cells
+#CD8 <- subset(intgHar, subset = CellType == "CD8" & blueprintEncode.main %nin% c("Erythrocytes", "HSC", "DC", "Macrophages", "Monocytes", "B-cells"))
+CD8 <- subset(intgHar, subset = CellType == "CD8")
+CD8 <- DietSeurat(CD8)
+
+saveRDS(CD8, "CD8.ACTP.subset_Lung.NeoTIL.BTIL_cell.labels_20231002.rds")
+
+rm(list = ls(all.names = T)); gc(); invisible(gc())
+```
+
+
+
+# Analysis of CD8 subset
+# ---------------------------------------------------------------------------------------------------------------
+## Cell number per Protocol
+```{r sample size, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE, fig.width=6, fig.height=5}
+
+`%nin%` <- Negate(`%in%`)
+CD8 <- readRDS("CD8.ACTP.subset_Lung.NeoTIL.BTIL_cell.labels_20231002.rds")
+
+Nb <- FetchData(CD8, vars = c("SampleID", "Protocol")) %>%
+  group_by(SampleID, Protocol) %>% summarise(cell_number = n())
+Nb$Protocol <- factor(Nb$Protocol, levels = c("NeoTIL", "BTIL"))
+
+p <- ggplot(Nb, aes(x = SampleID, y = cell_number, fill = SampleID)) +
+  geom_bar(stat = "identity", width = 0.8#, position = position_dodge(0.9)
+  ) +
+  scale_fill_manual(values = c("#FDA813","#FFF910", "#12D8B7", "#BA93FB")) + 
+  facet_grid(~ Protocol, switch = "x") +
+  #scale_y_continuous(trans = "log10", expand = c(0,0.1, 0,0.1)) +
+  scale_x_discrete(expand = c(0,0, 0,0)) +
+  scale_y_continuous(expand = c(0,0, 0,0)) +
+  ggtitle(paste("CD8.ACTP cell number", "\n", "per patient per Protocol")) +
+  ylab("CD8+ cell number") +
+  xlab("") +
+  theme_classic() +
+  theme(aspect.ratio = 2/1,
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank()
+  ) +
+  geom_text(aes(label = cell_number), size = 4, vjust = 1.5) 
+p
+
+pdf(paste0("CD8.ACTP_Lung.NeoTIL.BTIL_cellNumbers_per.patient_per.Protocol_20231002.pdf"), width = 10, height = 6.5)
+print(p)
+dev.off()
+
+```
+
+
+# Run Seurat pipeline
+```{r CD8 object analysis}
+
+# Apply pipeline
+# normalize
+CD8 <- as.SingleCellExperiment(CD8)
+cl100 = scran::quickCluster(CD8, min.size = 100) # can change this default min.size
+CD8 = scran::computeSumFactors(CD8, cluster = cl100)
+CD8 = scater::logNormCounts(CD8,
+                            log = T,
+                            transform = "log",
+                            pseudo_count = 1)
+CD8 <- as.Seurat(CD8, counts = "counts", data = "logcounts")
+CD8 <- SetIdent(CD8, value = "orig.ident")
+
+# QC of normalized merged Data
+pdf('CD8.ACTP_Lung.NeoTIL.BTIL_UMIcounts_before&after_normalization_20231002.pdf',
+    width = 10, height = 7)
+  par(mfrow = c(1,2))
+
+  hist(colSums(CD8@assays$RNA@counts),
+       breaks = 100,
+       col = 'wheat',
+       main = paste0("CD8.ACTP", " before normalization"),
+       xlab = "Sum of expression")
+
+  hist(colSums(CD8@assays$RNA@data),
+       breaks = 100,
+       col = 'wheat',
+       main = paste0("CD8.ACTP", " after normalization"),
+       xlab = "Sum of expression")
+
+dev.off()
+
+# scale & regress
+CD8 <- ScaleData(CD8, 
+                 features = rownames(CD8),
+                 vars.to.regress = c("nCount_RNA", "nFeature_RNA", "S.Score", "G2M.Score", "percent.mt"))
+
+# Find HVGs using default parameters
+CD8 <- FindVariableFeatures(CD8,
+                             selection.method = "vst",
+                             nfeatures = 2000,
+                             mean.function = ExpMean,
+                             dispersion.function = LogVMR,
+                             num.bin = 40,
+                             binning.method = "equal_width", # "equal_frequency"
+                             mean.cutoff = c(0.1, 8), #c(0.0125, 4),
+                             dispersion.cutoff = c(0.5, Inf)) #c(0, Inf)) # c(0, 0.4)
+
+# Dimensional reduction with PCA, use 100pc
+CD8 <- RunPCA(CD8,
+               features = VariableFeatures(CD8),
+               npcs = 100,
+               ndims.print = 1:10,
+               nfeatures.print = 10,
+               reduction.key = 'PC_',
+               reduction.name = 'PCA')
+
+saveRDS(CD8, "CD8.ACTP_Lung.NeoTIL.BTIL_norm_scale.regress.hvg.100pc_20231002.rds")
+
+```
+
+
+
+# 20231002 STARTS HERE!!!
+```{r load CD8 object from 20230717}
+
+`%nin%` <- Negate(`%in%`)
+CD8 <- readRDS("../20230717_wrongProtocol/CD8.ACTP_Lung.NeoTIL.BTIL_norm_scale.regress.hvg.100pc_20230717.rds")
+
+# Correct Protocol information
+CD8$Protocol <- ifelse(CD8$Patient %in% c("1EDA", "1HU3"), "NeoTIL", "BTIL")
+CD8$SampleID <- case_when(CD8$Patient == "1EDA" ~ "NeoTIL.1EDA",
+                          CD8$Patient == "1HU3" ~ "NeoTIL.1HU3",
+                          CD8$Patient == "1JA0" ~ "BTIL.1JA0",
+                          CD8$Patient == "1JOC" ~ "BTIL.1JOC"
+                          )
+
+CD8$Protocol <- factor(CD8$Protocol, levels = c("NeoTIL", "BTIL"))
+CD8$SampleID <- factor(CD8$SampleID, levels = c("NeoTIL.1EDA", "NeoTIL.1HU3", "BTIL.1JA0", "BTIL.1JOC"))
+
+saveRDS(CD8, "CD8.ACTP_Lung.NeoTIL.BTIL_norm_scale.regress.hvg.100pc_20231002.rds")
+
+```
+
+
+
+## Cell number per Protocol
+```{r sample size, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE, fig.width=6, fig.height=5}
+
+Nb <- FetchData(CD8, vars = c("SampleID", "Protocol")) %>%
+  group_by(SampleID, Protocol) %>% summarise(cell_number = n())
+
+p <- ggplot(Nb, aes(x = SampleID, y = cell_number, fill = SampleID)) +
+  geom_bar(stat = "identity", width = 0.8#, position = position_dodge(0.9)
+  ) +
+  scale_fill_manual(values = c("#FDA813","#FFF910", "#12D8B7", "#BA93FB")) + 
+  facet_grid(~ Protocol, switch = "x") +
+  #scale_y_continuous(trans = "log10", expand = c(0,0.1, 0,0.1)) +
+  scale_x_discrete(expand = c(0,0, 0,0)) +
+  scale_y_continuous(expand = c(0,0, 0,0)) +
+  ggtitle(paste("CD8.ACTP cell number", "\n", "per patient per Protocol")) +
+  ylab("CD8+ cell number") +
+  xlab("") +
+  theme_classic() +
+  theme(aspect.ratio = 2/1,
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank()
+  ) +
+  geom_text(aes(label = cell_number), size = 4, vjust = 1.5) 
+p
+
+pdf(paste0("CD8.ACTP_Lung.NeoTIL.BTIL_cellNumbers_per.patient_per.Protocol_20231002.pdf"), width = 10, height = 6.5)
+print(p)
+dev.off()
+
+```
+
+
+# ------------------------------------------------------------------------------------------------------
+## DE tables & volcano plots of DE genes only for ACTP
+## (Significance is defined by |avg_log2FC| > 0.25, fdr = 0.01, minimum 25% of cells expressing the genes in any cell group)
+# -----------------------
+```{r DE FUNCTION, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+
+# function for DE, table and volcano
+DE <- function(seu, DEclass, id1, id2, test) {
+  Idents(seu) <- seu[[DEclass]] # switch identity to class used for DE
+  Idents(seu) <- as.character(Idents(seu)) # VERY IMPORTANT!!!
+  #subseu <- subset(seu, subset = CellType == subs)
+  # do DE
+  Marker <- FindMarkers(seu,
+                        ident.1 = id1, ident.2 = id2,
+                        only.pos = F,
+                        min.pct = 0.1,
+                        logfc.threshold = 0,   # 0.58496 = 1.5x; default 0.25
+                        min.cells.feature = 3,
+                        min.cells.group = 3,
+                        pseudocount.use = 0.1, # default 1
+                        #return.thresh = 0.01, only works with FindAllMarkers
+                        assay = 'RNA',
+                        slot = 'data',
+                        #latent.vars = "SampleID", #uncomment this if use test LR!!!!!!
+                        test.use = test
+                        )
+
+  Marker <- Marker %>%
+    rownames_to_column(var = "gene") %>%
+    data.table::setnames(c("avg_log2FC", "p_val_adj"), c("log2FC", "padj"))
+
+  # save significant DE list
+  write.table(Marker,
+              paste0("CD8.ACTP_Lung.NeoTIL.BTIL_", DEclass, "_", id1, "_vs_", id2, "_", test, ".test_all.DEgenes_10pc.cells_20231002.txt"),
+              append = F, quote = F, sep = "\t", row.names = F, col.names = T)
+  sigMarker <- Marker %>% filter(padj <= 0.01) %>% arrange(desc(log2FC))
+  write.table(sigMarker,
+              paste0("CD8.ACTP_Lung.NeoTIL.BTIL_", DEclass, "_", id1, "_vs_", id2, "_", test, ".test_fdr1.DEgenes_10pc.cells_20231002.txt"),
+              append = F, quote = F, sep = "\t", row.names = F, col.names = T)
+  
+  # # table of significant DE genes
+  # kbl(sigMarker, caption = paste0("CD8.ACTP_Lung.NeoTIL.BTIL_", DEclass, "_", id1, "_vs_", id2, "_", test)) %>% 
+  #   kable_styling(bootstrap_options = c("hover", "condensed", "responsive"), 
+  #               full_width = F, position = "left", fixed_thead = T, font_size = 12) %>% 
+  #   scroll_box(width = "100%", height = "200px")
+  
+  return(Marker)
+}
+
+```
+
+
+```{r find DE genes for CD8 NeoBTIL R vs notR, fig.width=16, fig.height=10}
+Marker <- DE(CD8, "Protocol", "NeoTIL", "BTIL", "LR")
+sigMarker <- Marker %>% filter(padj <= 0.01) %>% arrange(desc(log2FC))
+```
+
+
+
+```{r JC.Oliveira gene lists, include=FALSE, eval=FALSE}
+
+lineage = c("CD8A", "CD8B", "KLRD1", "KIR2DL4", "NCAM1", "TRGV5", "CD3E")
+naive.memory = c("SELL", "CCR7", "IL7R", "CD28", "FAS", "CD27", "ITGAE", "ITGAL", "ITGAM", "ITGAX", "LTB")
+exhaustion.inhibition = c("PDCD1", "TIGIT", "HAVCR2", "LAG3", "CTLA4", "CD244", "KLRG1", "TNFRSF14", "BTLA", "CD160")
+activation = c("CD38", "CD28", "ENTPD1", "CD69", "IL2RA", "ICOS", "TNFRSF4", "TNFRSF9", "HLA-DRA", "CD40LG")
+effector.cytokine = c("GZMA", "GZMB", "GZMH", "GZMK", "GZMM", "PRF1", "NKG7", "GNLY", "IFNG", "IL2", "FASLG", "TNF") #"IL17A", 
+effector.molecule = c("CCL3", "CCL4", "CCL5", "CST7")
+transcription.factor = c("LEF1", "TCF7", "EOMES", "NR4A1", "TBX21", "PRDM1", "TOX", "GATA3", "ID2", "ID3", "ZNF683", "FOXP3", "MKI67", "TOP2A", "FOS", "JUN")
+NK.gamma.delta = c("TRGV9", "TRDV2", "KLRB1", "KLRC3")
+chemokine.receptor = c("CCR4", "CCR5", "CXCR3", "CXCR4")
+co.stimulation = c("CD80", "CD86", "CD83")
+to.be.classified = c("CD74", "CD52", "ANXA1", "VCAM1", "CD200", "ISG15", "ITGA4", "IL12RB1", "IL12RB2")
+
+```
+
+
+```{r combine AH & JC.Oliveira markers from DE gene list}
+
+AH <- c("B3GAT1", "ITGAE", "GZMK", "FOXP3", "CTLA4", "KLRG1", "TCF7", "TNFSF9", "JUN", "CD27", "CD40", "MKI67", "BTLA")
+
+hla.dr <- Marker[str_detect(Marker$gene, "HLA-DR"), ]
+hla.dr <- hla.dr$gene
+
+AHlist <- c(AH, hla.dr)
+AHgene <- intersect(AHlist, Marker$gene)
+
+Mcat = list(lineage, naive.memory, exhaustion.inhibition, activation, effector.cytokine, effector.molecule, transcription.factor, NK.gamma.delta, chemokine.receptor, co.stimulation, to.be.classified, AHgene)
+Mname = list("lineage", "naive.memory", "exhaustion.inhibition", "activation", "effector.cytokine", "effector.molecule", "transcription.factor", "NK.gamma.delta", "chemokine.receptor", "co.stimulation", "to.be.classified", "AH.selection")
+
+selList <- unlist(Mcat, recursive = FALSE) # to label on volcano plot below !!!
+saveRDS(selList, "Selected.markers_for_plotting_LungNeoTIL_vs_LungBTIL_20231002.RData")
+
+```
+
+
+
+```{r prep for volcano plots}
+# load DE table and prepare marker lists for volcano plots
+
+# Create variable point size depending on padj
+Marker <- Marker %>%  mutate(revPval = -log10(padj)) %>% arrange(desc(revPval))
+noInf <- Marker %>% filter(revPval != Inf) # this is to get the non-Inf max value
+Marker <- Marker %>% mutate(adjRevPval = ifelse(revPval == Inf, max(noInf$revPval)+1, revPval)) %>% 
+  mutate(ptSize = 5*adjRevPval/max(adjRevPval))
+
+# Set colors for significance levels   
+keyvals <- ifelse(
+  Marker$padj < 0.01 & Marker$log2FC >= 1, "red3",
+  ifelse(Marker$padj < 0.01 & Marker$log2FC <= -1, "royalblue",
+         ifelse(Marker$padj < 0.01 & (Marker$log2FC < 1 & Marker$log2FC > 0), "goldenrod",
+                ifelse(Marker$padj < 0.01 & (Marker$log2FC < 0 & Marker$log2FC > -1), "forestgreen",
+                       "grey30"))))
+
+names(keyvals)[keyvals == "red3"] <- "UP at log2FC>=1"
+names(keyvals)[keyvals == "goldenrod"] <- "UP at 0<log2FC<1"
+names(keyvals)[keyvals == "forestgreen"] <- "DOWN at -1<log2FC<0"
+names(keyvals)[keyvals == "royalblue"] <- "DOWN at log2FC<=-1"
+names(keyvals)[keyvals == "grey30"] <- "NS"
+
+```
+
+
+
+```{r volcano plot function}
+
+volcano <- function(id1, id2, test, labCategory, hiliLabels) {
+  p <- print(EnhancedVolcano(Marker,
+                             lab = Marker$gene,
+                             x = "log2FC",
+                             y = "padj",
+                             title = paste0("\n", "CD8.ACTP Lung.", id1, "_vs_Lung.", id2,
+                                            "\n", test,".test_", labCategory, " at fdr0.01"),
+                             subtitle = "",
+                             xlab = "log2 fold change",
+                             ylab = "-log10(adjusted p-value)",
+                             xlim = c(min(Marker$log2FC)*1.1, max(Marker$log2FC)*1.1),
+                             #ylim = c(0, max(-log10(Marker$p_val_adj)*1.1)),
+                             pCutoff = 0.01,
+                             FCcutoff = 1,
+                             cutoffLineType = "dashed",
+                             pointSize = Marker$ptSize,
+                             axisLabSize = 17,
+                             labSize = 4,
+                             labFace = "bold",
+                             boxedLabels = TRUE,
+                             #parseLabels = FALSE,
+                             colCustom = keyvals,
+                             selectLab = hiliLabels,
+                             colAlpha = 0.6,
+                             legendPosition = "top",
+                             legendLabSize = 16,
+                             drawConnectors = TRUE,
+                             widthConnectors = 0.1,
+                             arrowheads = FALSE,
+                             max.overlaps = 45, # or Inf
+                             maxoverlapsConnectors = 45, # or Inf
+                             gridlines.major = FALSE,
+                             gridlines.minor = FALSE,
+                             border = "full") + 
+               ggplot2::scale_x_continuous(breaks = seq(round(min(Marker$log2FC)), round(max(Marker$log2FC)), 0.5))
+  )
+  
+  p1 <- p + 
+    ggplot2::scale_x_continuous(breaks = seq(-5.5, 5.5, 0.5)) +
+    theme(axis.title = element_text(size = 18, face = "bold"))
+  
+  pdf(paste0("CD8.ACTP_Lung.", id1, "_vs_Lung.", id2, "_", test, ".test_", labCategory, "_volcanoPlot_10pc.cells_20231002.pdf"),
+      width = 14, height = 10)
+  print(p1)
+  dev.off()
+  
+}  
+
+```
+
+
+```{r plot volcano for DE genes, fig.width=14, fig.height=10}
+
+DE.labels = Marker$gene[which(names(keyvals) %in% c("UP at log2FC>=1",
+                                                    "DOWN at log2FC<=-1"))]
+selected.labels = intersect(selList, Marker$gene)
+
+#volcano <- function(id1, id2, test, labCategory, hiliLabels)
+volcano("NeoTIL", "BTIL", "LR", "DE.genes", DE.labels)
+volcano("NeoTIL", "BTIL", "LR", "selected.markers", selected.labels)
+
+```
+
+
+
+```{r stacked violin plots, include=FALSE}
+
+violinPlot <- function(k, i){
+  pdf(paste0("CD8.ACTP_Lung.NeoTIL_vs_LungBTIL_stacked.violin.plots_for_", k, "-markers_20231002.pdf"),
+      width = 8, height = length(i))
+  print(VlnPlot(CD8, features = i, split.by = "Protocol", group.by = "SampleID", 
+                assay = "RNA", slot = "data", adjust = 0.6,
+                cols = c("brown1", "royalblue"),
+                pt.size = 0, combine = T, sort = FALSE, flip = TRUE, stack = TRUE
+  ) + 
+    plot_annotation(paste0(k, " markers"),
+                    theme = theme(plot.title = element_text(size = 12, face = "bold"))))
+  dev.off()
+}
+
+mapply(violinPlot, Mname, Mcat) # for selected markers
+
+# For UP & DN genes with |log2FC| >= 1 at FDR0.01
+UP <- sigMarker %>% filter(log2FC >= 1)
+UP <- UP$gene
+DN <- sigMarker %>% filter(log2FC <= -1)
+DN <- DN$gene
+
+mapply(violinPlot, list("top UP-regulated", "top DN-regulated"), list(UP, DN))
+
+```
+# 20231002 STOPS HERE!!!
+# FOR REACTOME PATHWAY ENRICHMENT ANALYSIS, CONTINUE WITH FOLDER scGEX/clusterProfiler/20231002 !!!!! 
+

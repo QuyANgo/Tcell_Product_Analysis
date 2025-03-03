@@ -1,0 +1,95 @@
+---
+title: "clusterProfiler - enriched Reactome pathways for Lung.NeoTIL vs. Lung.BTIL 20231002"
+author: "Quy A. Ngo"
+date: "02-Oct-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+setwd("/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX/clusterProfiler/20231002_Lung.NeoTIL_vs_Lung.BTIL/")
+#mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX"
+
+`%nin%` <- Negate(`%in%`)
+```
+
+
+```{r load libraries}
+
+library(tidyverse)
+library(GGally)
+library(hrbrthemes)
+library(clusterProfiler)
+library(enrichplot)
+library(patchwork)
+library(ggpubr)
+library(cowplot)
+library(data.table)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(DOSE)
+library(msigdbr)
+
+```
+
+
+```{r load DE tables}
+
+all <- read.table("../../Lung.NeoTIL_vs_Lung.BTIL/20231002/CD8.ACTP_Lung.NeoTIL.BTIL_Protocol_NeoTIL_vs_BTIL_LR.test_fdr1.DEgenes_10pc.cells_20231002.txt", sep = "\t", header = T) %>% 
+  filter(abs(log2FC) >= 0.25) %>% 
+  dplyr::select(gene, log2FC)
+allUP <- all %>% filter(log2FC > 0.25)
+allDN <- all %>% filter(log2FC < 0.25)
+
+```
+
+
+# Gene lists
+```{r convert gene Symbol to Ensembl & Entrez IDs}
+
+IDconvert <- function(DE) {
+  ids <- bitr(c(DE$gene), fromType = "SYMBOL", toType = c("ENTREZID"), OrgDb = "org.Hs.eg.db")
+  # dedup_ids <- ids[!duplicated(ids[c("ENTREZID")]), ]
+  # dedup_ids <- ids[!duplicated(ids[c("SYMBOL")]), ]
+  # dedup_ids <- na.omit(dedup_ids)
+  # 
+  ids <- ids %>% left_join(DE, by = c("SYMBOL" = "gene"))
+  
+  gene.list <- ids$log2FC
+  names(gene.list) <- ids$ENTREZID
+  
+  return(gene.list)
+}
+
+allUP.list <- IDconvert(allUP)
+allDN.list <- IDconvert(allDN)
+
+```
+
+
+# enriched Reactome pathway analysis
+```{r Reactome, fig.width=10, fig.height=10}
+
+Reactome <- function(gene.list, expDir) {
+  x <- enrichPathway(gene = c(names(gene.list)),
+                     pvalueCutoff = 0.01,
+                     readable = T)
+  
+  write.table(as.data.frame(x), paste0("Enriched.fdr1_", expDir, ".Reactome.pathways_of_CD8.ACTP_for_fdr1_l2FC0.25_DEgenes_LungNeoTIL.vs.LungBTIL_20231002.txt"),
+              sep = "\t", quote = F, row.names = F, col.names = T)
+
+  pdf(paste0("Enriched.fdr1_top_", expDir, ".Reactome.pathways_of_CD8.ACTP_for_fdr1_l2FC0.25_DEgenes_LungNeoTIL.vs.LungBTIL_20231002.pdf"),
+      height = 12, width = 10)
+  print(barplot(x, showCategory = 20))
+  print(dotplot(x, showCategory = 20))
+  dev.off()
+  
+  return(as.data.frame(x))
+}
+
+allUP <- Reactome(allUP.list, "activated")
+allDN <- Reactome(allDN.list, "repressed") # If l2FC 0.5 -> Error in ans[ypos] <- rep(yes, length.out = len)[ypos] : replacement has length zero -> only 140 genes, too few for enriched pathway analysis
+
+```
+
+

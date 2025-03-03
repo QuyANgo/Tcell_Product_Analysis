@@ -1,0 +1,252 @@
+---
+title: "clusterProfiler - enriched Reactome pathways for common DEGs of ATATIL.R vs others 20230811"
+author: "Quy A. Ngo"
+date: "11-Aug-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+setwd("/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX/clusterProfiler/20230811_ATATIL.R_vs_others/")
+#mainDir <- "/home/localadmin/Desktop/RESEARCH/MArnaud/scGEX"
+
+`%nin%` <- Negate(`%in%`)
+```
+
+
+```{r load libraries}
+
+library(tidyverse)
+library(GGally)
+library(hrbrthemes)
+library(clusterProfiler)
+library(enrichplot)
+library(patchwork)
+library(ggpubr)
+library(cowplot)
+library(data.table)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(DOSE)
+library(msigdbr)
+
+```
+
+
+```{r load DE tables}
+
+allDE <- read.table("../../ATATIL.R_vs_others/20230802/intgHar_CD8.ACTP_MelLung.allTIL_allDEG_LRtest_fdr0.01_20230808.txt", sep = "\t", header = T) %>% data.table::setnames(c("Gene", "avg_log2FC"), c("gene", "log2FC"))
+
+DE1 <- allDE %>% filter(Comparison == "ATATIL.R_vs_ATATIL.NR" & abs(log2FC) >= 0.25) %>% dplyr::select(gene, log2FC)
+DE1up <- DE1 %>% filter(log2FC > 0.25)
+DE1dn <- DE1 %>% filter(log2FC < 0.25)
+
+DE2 <- allDE %>% filter(Comparison == "ATATIL.R_vs_MelNeoTIL.R" & abs(log2FC) >= 0.25) %>% dplyr::select(gene, log2FC)
+DE2up <- DE2 %>% filter(log2FC > 0.25)
+DE2dn <- DE2 %>% filter(log2FC < 0.25)
+
+DE3 <- allDE %>% filter(Comparison == "ATATIL.R_vs_MelNeoTIL.NR" & abs(log2FC) >= 0.25) %>% dplyr::select(gene, log2FC)
+DE3up <- DE3 %>% filter(log2FC > 0.25)
+DE3dn <- DE3 %>% filter(log2FC < 0.25)
+
+DE4 <- allDE %>% filter(Comparison == "ATATIL.R_vs_LungNeoTIL.NR" & abs(log2FC) >= 0.25) %>% dplyr::select(gene, log2FC)
+DE4up <- DE4 %>% filter(log2FC > 0.25)
+DE4dn <- DE4 %>% filter(log2FC < 0.25)
+
+DE5 <- allDE %>% filter(Comparison == "ATATIL.R_vs_LungBTIL.R" & abs(log2FC) >= 0.25) %>% dplyr::select(gene, log2FC)
+DE5up <- DE5 %>% filter(log2FC > 0.25)
+DE5dn <- DE5 %>% filter(log2FC < 0.25)
+
+```
+
+
+# Gene lists
+```{r convert gene Symbol to Ensembl & Entrez IDs}
+
+IDconvert <- function(DE) {
+  ids <- bitr(c(DE$gene), fromType = "SYMBOL", toType = c("ENTREZID"), OrgDb = "org.Hs.eg.db")
+  # dedup_ids <- ids[!duplicated(ids[c("ENTREZID")]), ]
+  # dedup_ids <- ids[!duplicated(ids[c("SYMBOL")]), ]
+  # dedup_ids <- na.omit(dedup_ids)
+  # 
+  ids <- ids %>% left_join(DE, by = c("SYMBOL" = "gene"))
+  
+  gene.list <- ids$log2FC
+  names(gene.list) <- ids$ENTREZID
+  
+  return(gene.list)
+}
+
+DE1up.list <- IDconvert(DE1up)
+DE1dn.list <- IDconvert(DE1dn)
+
+DE2up.list <- IDconvert(DE2up)
+DE2dn.list <- IDconvert(DE2dn)
+
+DE3up.list <- IDconvert(DE3up)
+DE3dn.list <- IDconvert(DE3dn)
+
+DE4up.list <- IDconvert(DE4up)
+DE4dn.list <- IDconvert(DE4dn)
+
+DE5up.list <- IDconvert(DE5up)
+DE5dn.list <- IDconvert(DE5dn)
+
+```
+
+
+
+# enriched Reactome pathway analysis
+```{r Reactome, fig.width=10, fig.height=10}
+
+Reactome <- function(gene.list, expDir, DElistName, h) {
+  x <- enrichPathway(gene = c(names(gene.list)),
+                     pvalueCutoff = 0.01,
+                     readable = T)
+  
+  write.table(as.data.frame(x), paste0("Enriched.fdr1_Reactome.pathways_in_CD8.ACTP_for_fdr1_l2FC0.25_", expDir, ".DEgenes_of_", DElistName, "_20230811.txt"),
+              sep = "\t", quote = F, row.names = F, col.names = T)
+
+  pdf(paste0("Enriched.fdr1_top_Reactome.pathways_in_CD8.ACTP_for_fdr1_l2FC0.25_", expDir, ".DEgenes_of_", DElistName, "_20230811.pdf"),
+      height = h, width = 10)
+  plot.new(); title(paste(expDir, DElistName)) # common this line if does NOT want the title page!!!
+  print(barplot(x, showCategory = 20))
+  print(dotplot(x, showCategory = 20))
+  dev.off()
+  
+  x <- as.data.frame(x) %>% mutate(Comparison = DElistName)
+  return(x)
+}
+
+DE1up.re <- Reactome(DE1up.list, "UP", "ATATIL.R_vs_ATATIL.NR", 12)
+DE1dn.re <- Reactome(DE1dn.list, "DN", "ATATIL.R_vs_ATATIL.NR", 3)
+
+DE2up.re <- Reactome(DE2up.list, "UP", "ATATIL.R_vs_MelNeoTIL.R", 14)
+DE2dn.re <- Reactome(DE2dn.list, "DN", "ATATIL.R_vs_MelNeoTIL.R", 12)
+
+DE3up.re <- Reactome(DE3up.list, "UP", "ATATIL.R_vs_MelNeoTIL.NR", 12)
+DE3dn.re <- Reactome(DE3dn.list, "DN", "ATATIL.R_vs_MelNeoTIL.NR", 12)
+
+DE4up.re <- Reactome(DE4up.list, "UP", "ATATIL.R_vs_LungNeoTIL.NR", 12)
+DE4dn.re <- Reactome(DE4dn.list, "DN", "ATATIL.R_vs_LungNeoTIL.NR", 12)
+
+DE5up.re <- Reactome(DE5up.list, "UP", "ATATIL.R_vs_LungBTIL.R", 12)
+DE5dn.re <- Reactome(DE5dn.list, "DN", "ATATIL.R_vs_LungBTIL.R", 12)
+
+```
+
+
+# common enriched pathways
+```{r common enriched pathways of all 5 comparisons}
+
+# get common UP/DN pathways 
+ALLup.re <- rbind(DE1up.re, DE2up.re, DE3up.re, DE4up.re, DE5up.re)
+ALLdn.re <- rbind(DE1dn.re, DE2dn.re, DE3dn.re, DE4dn.re, DE5dn.re)
+
+ALLup.re$Comparison <- factor(ALLup.re$Comparison, 
+                              levels = c("ATATIL.R_vs_ATATIL.NR", "ATATIL.R_vs_MelNeoTIL.R", "ATATIL.R_vs_MelNeoTIL.NR", "ATATIL.R_vs_LungNeoTIL.NR", "ATATIL.R_vs_LungBTIL.R"))
+ALLdn.re$Comparison <- factor(ALLdn.re$Comparison, 
+                              levels = c("ATATIL.R_vs_ATATIL.NR", "ATATIL.R_vs_MelNeoTIL.R", "ATATIL.R_vs_MelNeoTIL.NR", "ATATIL.R_vs_LungNeoTIL.NR", "ATATIL.R_vs_LungBTIL.R"))
+
+COMMup.re <- ALLup.re %>% group_by(ID) %>% summarise(comparisonNumber = n()) %>% filter(comparisonNumber == 5)
+COMMup.re <- ALLup.re %>% filter(ID %in% COMMup.re$ID) %>% arrange(ID, Comparison)
+
+COMMdn.re <- ALLdn.re %>% group_by(ID) %>% summarise(comparisonNumber = n()) %>% filter(comparisonNumber == 5) # NONE !!!
+COMMdn.re <- ALLdn.re %>% filter(ID %in% COMMdn.re$ID) %>% arrange(ID, Comparison) # NONE !!!
+
+
+# Save all comparisons
+save.comparison <- function(df, dfType, condition, comp) {
+  write.table(df, paste0(dfType, "_enriched.fdr1_", condition, "_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_CD8.ACTP_", comp, "_20230811.txt"),
+              sep = "\t", quote = F, row.names = F, col.names = T)
+}
+
+save.comparison(COMMup.re, "Common", "activated", "ATATIL.R_vs_others")
+save.comparison(COMMdn.re, "Common", "repressed", "ATATIL.R_vs_others")
+
+```
+
+
+# compareCluster
+```{r combine gene lists for compareCluster}
+
+## Combine entire gene lists of individual reactome pathway lists 
+dfGeneList <- function(geneList,ptwyDir, comp) {
+  df <- data.frame(Entrez = names(geneList), FC = geneList) %>% mutate(ptwyType = ptwyDir) %>% mutate(Comparison = comp)
+}
+
+dfUP1 <- dfGeneList(DE1up.list, "activated", "ATATILr_vs_ATATILnr")
+dfDN1 <- dfGeneList(DE1dn.list, "repressed", "ATATILr_vs_ATATILnr")
+
+dfUP2 <- dfGeneList(DE2up.list, "activated", "ATATILr_vs_MelNeoTILr")
+dfDN2 <- dfGeneList(DE2dn.list, "repressed", "ATATILr_vs_MelNeoTILr")
+
+dfUP3 <- dfGeneList(DE3up.list, "activated", "ATATILr_vs_MelNeoTILnr")
+dfDN3 <- dfGeneList(DE3dn.list, "repressed", "ATATILr_vs_MelNeoTILnr")
+
+dfUP4 <- dfGeneList(DE4up.list, "activated", "ATATILr_vs_LungNeoTILnr")
+dfDN4 <- dfGeneList(DE4dn.list, "repressed", "ATATILr_vs_LungNeoTILnr")
+
+dfUP5 <- dfGeneList(DE5up.list, "activated", "ATATILr_vs_LungBTILr")
+dfDN5 <- dfGeneList(DE5dn.list, "repressed", "ATATILr_vs_LungBTILr")
+
+allGeneList.df <- rbind(dfUP1, dfDN1, dfUP2, dfDN2, dfUP3, dfDN3, dfUP4, dfDN4, dfUP5, dfDN5)
+allGeneList.df$ptwyType <- factor(allGeneList.df$ptwyType, levels = c("activated", "repressed"))
+allGeneList.df$Comparison <- factor(allGeneList.df$Comparison, 
+                                    levels = c("ATATILr_vs_ATATILnr", "ATATILr_vs_MelNeoTILr", "ATATILr_vs_MelNeoTILnr", "ATATILr_vs_LungNeoTILnr", "ATATILr_vs_LungBTILr"))
+
+## comparecluster
+reactome <- compareCluster(Entrez~ptwyType+Comparison, data = allGeneList.df, fun = "enrichPathway", pvalueCutoff = 0.01)
+reactome@compareClusterResult$ptwyType <- factor(reactome@compareClusterResult$ptwyType, levels = c("activated", "repressed"))
+reactome@compareClusterResult$Comparison <- factor(reactome@compareClusterResult$Comparison, levels = c("ATATILr_vs_ATATILnr", "ATATILr_vs_MelNeoTILr", "ATATILr_vs_MelNeoTILnr", "ATATILr_vs_LungNeoTILnr", "ATATILr_vs_LungBTILr"))
+
+#saveRDS(reactome, "compareCluster_enriched.fdr1_activated.and.repressed_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_CD8.ACTP_ATATIL.R_vs_others_20230811.rds")
+
+
+# verify and compare results of compareCluster with above independent results
+reactome.df <- reactome@compareClusterResult
+reactome.act <- reactome.df %>% filter(ptwyType == "activated") %>% group_by(ID) %>% summarise(comparisonNumber = n()) %>% filter(comparisonNumber == 5)
+reactome.act <- reactome.df %>% filter(ptwyType == "activated" & ID %in% reactome.act$ID) %>% arrange(ID, Comparison)
+reactome.rpr <- reactome.df %>% filter(ptwyType == "repressed") %>% group_by(ID) %>% summarise(comparisonNumber = n()) %>% filter(comparisonNumber == 5)
+reactome.rpr <- reactome.df %>% filter(ptwyType == "repressed" & ID %in% reactome.rpr$ID) %>% arrange(ID, Comparison)
+
+# -> SAME RESULTS :-)
+```
+
+
+# NEED TO CLEAN UP COMMON UP+DN PATHWAYS !!! plot common enriched reactome pathways
+```{r plot common enriched pathways, fig.width=14, fig.height=6}
+
+# # reactome
+# UP10 <- read.table("Coordinated.rankings_common_enriched.fdr1_activated_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_NeoBTIL.vs.SolTIL_20230811.txt", sep = "\t", header = T) %>%
+#   filter(rankGroup == "top20.NeoBSol") %>%
+#   slice_head(n=10) %>%
+#   dplyr::select(ID, Description)
+# 
+# DN10 <- read.table("Coordinated.rankings_common_enriched.fdr1_repressed_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_NeoBTIL.vs.SolTIL_20230811.txt", sep = "\t", header = T) %>%
+#   filter(rankGroup == "top20.NeoBSol") %>%
+#   slice_head(n=10) %>%
+#   dplyr::select(ID, Description)
+
+# top10 <- reactome@compareClusterResult %>% filter(ID %in% c(UP10$ID, DN10$ID))
+
+UP <- reactome@compareClusterResult %>% filter(ID %in% reactome.act$ID)
+reactome.UP <- reactome
+reactome.UP@compareClusterResult <- UP
+
+# comm <- reactome@compareClusterResult %>% filter(ID %in% c(allsel.UP$ID, allsel.DN$ID))
+# reactome.comm <- reactome
+# reactome.comm@compareClusterResult <- comm
+
+# plot common activated pathways for reactome
+p <- dotplot(reactome.UP, x = "Comparison", showCategory = 12) + 
+  #ggplot2::facet_grid(~ptwyType) +
+  ggplot2::ggtitle(paste("Common significant enriched activated Reactome pathways of", "\n", "CD8.ACTP ATATIL.R vs. others"))
+p
+pdf("Dotplot_common_significant.fdr1_enriched.activated_Reactome.pathways_for_fdr1_l2FC0.25_DEgenes_of_CD8.ACTP_ATATIL.R_vs_others_20230811.pdf", width = 14, height = 6)
+p
+dev.off()
+
+```
+
+
